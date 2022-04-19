@@ -1,7 +1,7 @@
 .idea
 /weights
 /assets
-/__pycache__
+__pycache__/
 /.de
 /encoder4editing
 draw.py

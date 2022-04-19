@@ -5,6 +5,7 @@ import tqdm
 from custom_types import *
 import imageio
 import PIL
+from PIL import Image
 import scipy
 from scipy.ndimage.filters import gaussian_filter1d
 import constants
@@ -61,6 +62,19 @@ def crop_image(filepath, quad, enable_padding=False):
     if IMAGE_SIZE < transform_size:
         img = img.resize((IMAGE_SIZE, IMAGE_SIZE), PIL.Image.ANTIALIAS)
     return img
+
+
+def calc_alignment_coefficients(pa, pb):
+    matrix = []
+    for p1, p2 in zip(pa, pb):
+        matrix.append([p1[0], p1[1], 1, 0, 0, 0, -p2[0] * p1[0], -p2[0] * p1[1]])
+        matrix.append([0, 0, 0, p1[0], p1[1], 1, -p2[1] * p1[0], -p2[1] * p1[1]])
+
+    a = np.matrix(matrix, dtype=float)
+    b = np.array(pb).reshape(8)
+
+    res = np.dot(np.linalg.inv(a.T * a) * a.T, b)
+    return np.array(res).reshape(8)
 
 
 class FaceAlign:
@@ -171,6 +185,28 @@ class FaceAlign:
         for i, crop in enumerate(crops):
             files_utils.save_np(crop, f'{out_path}/crop_{i:04d}')
 
+    @staticmethod
+    def paste_image(quad, image_new, image_orig):
+        image_new = Image.fromarray(image_new).convert('RGBA')
+        image_orig = Image.fromarray(image_orig).convert('RGBA')
+        paste = image_new.transform(image_orig.size, Image.PERSPECTIVE, quad, Image.BILINEAR)
+        image_orig.paste(paste, (0, 0), mask=paste)
+        image_orig = V(image_orig)[:, :, :3]
+        return image_orig
+
+    def uncrop_video(self, video_path: str, crops_root, video_new: str):
+        vid_orig = imageio.get_reader(f"{video_path}", 'ffmpeg')
+        vid_new = imageio.get_reader(f"{video_new}", 'ffmpeg')
+        quads = files_utils.load_np(f'{crops_root}/quads')
+
+        num_frames = min(vid_orig.count_frames(), vid_new.count_frames())
+        seq_paste = []
+        for i in range(num_frames):
+            quad = quads[i]
+            frame_orig, frame_new = vid_orig.get_data(i), vid_new.get_data(i)
+            image_size = frame_new.shape[0]
+            pasted = self.paste_image(quad, frame_new, frame_orig)
+
     def __init__(self):
         self.predictor = dlib.shape_predictor("./weights/ffhq/shape_predictor_68_face_landmarks.dat")
         self.detector = dlib.get_frontal_face_detector()
@@ -181,8 +217,10 @@ class FaceAlign:
 
 if __name__ == '__main__':
     aligner = FaceAlign()
-    aligner.crop_video(f"/mnt/r/projects/facesimile/shots/101/purpledino_genwoman/comp_wip/images/comp_main_publish_qt/101_purpledino_genwoman_comp_v010.mov",
-                       f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v010", 10000)
+    aligner.uncrop_video(f"/mnt/r/projects/facesimile/shots/101/purpledino_genwoman/comp_wip/images/comp_main_publish_qt/101_purpledino_genwoman_comp_v010.mov",
+                         f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v010", f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v010/orig_align.mp4")
+    # aligner.crop_video(f"/mnt/r/projects/facesimile/shots/101/purpledino_genwoman/comp_wip/images/comp_main_publish_qt/101_purpledino_genwoman_comp_v010.mov",
+    #                    f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v010", 10000)
 
     # crop_video(f"{constants.DATA_ROOT}/raw_videos/obama_062814", 30, f"{constants.DATA_ROOT}/processed")
     # viseme2vec(f"{constants.DATA_ROOT}/raw_videos/obama_062814",
