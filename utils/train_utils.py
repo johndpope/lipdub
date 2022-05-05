@@ -3,14 +3,16 @@ import constants
 from tqdm import tqdm
 from utils import files_utils
 import os
-from models import audio2style, models_utils, style_correct, viseme_disentanglement_model
+from models import audio2style, models_utils, style_correct, viseme_disentanglement_model, untet_model
 import options
 
 
 LI = Union[T, float, int]
 Models = {'audio2style': audio2style.Audio2Style,
           'style_correct': style_correct.StyleCorrect,
-          'disentanglement_viseme': viseme_disentanglement_model.VisemeDisentanglement}
+          'disentanglement_viseme': viseme_disentanglement_model.VisemeDisentanglement,
+          'viseme_classifier': viseme_disentanglement_model.VisemeClassifier,
+          'unet': untet_model.UnetEncoderDecoder}
 
 
 def is_model_clean(model: nn.Module) -> bool:

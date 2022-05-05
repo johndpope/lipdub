@@ -3,6 +3,7 @@ import sys
 
 
 IS_WINDOWS = sys.platform == 'win32'
+IS_PYCHARM = "PYCHARM_HOSTED" in os.environ
 get_trace = getattr(sys, 'gettrace', None)
 DEBUG = get_trace is not None and get_trace() is not None
 EPSILON = 1e-4

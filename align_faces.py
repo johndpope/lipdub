@@ -9,6 +9,7 @@ from PIL import Image
 import scipy
 from scipy.ndimage.filters import gaussian_filter1d
 import constants
+import ffmpeg
 
 
 IMAGE_SIZE = 1024
@@ -175,28 +176,60 @@ class FaceAlign:
 
         return crops, orig_images, quads
 
+    @staticmethod
+    def output_sound(video_path, out_path):
+        audio_path = f'{out_path}/audio.wav'
+        if not files_utils.is_file(audio_path):
+            files_utils.init_folders(audio_path)
+            in1 = ffmpeg.input(video_path)
+            a1 = in1.audio
+            out = ffmpeg.output(a1, audio_path)
+            out.run()
+
     def crop_video(self, video_path: str, out_path: str, max_len: int):
         vid = imageio.get_reader(f"{video_path}", 'ffmpeg')
         fps = vid._meta['fps']
+        self.output_sound(video_path, out_path)
         num_frames = min(int(fps * max_len), vid.count_frames())
+        metadata = {'fps': fps, 'frames_count': vid.count_frames(), 'actual_frames': num_frames}
         crops, orig_images, quads = self.crop_faces(vid, num_frames)
         files_utils.save_np(quads, f'{out_path}/quads')
         image_utils.gif_group(crops, f'{out_path}/orig_align', fps)
         for i, crop in enumerate(crops):
             files_utils.save_np(crop, f'{out_path}/crop_{i:04d}')
+        files_utils.save_pickle(metadata, f'{out_path}/metadata')
 
     @staticmethod
     def paste_image(quad, image_new, image_orig):
+        image_size = image_new.shape[0]
+        inverse_transform = calc_alignment_coefficients(quad + 0.5, [[0, 0], [0, image_size], [image_size, image_size],
+                                                                     [image_size, 0]])
         image_new = Image.fromarray(image_new).convert('RGBA')
         image_orig = Image.fromarray(image_orig).convert('RGBA')
-        paste = image_new.transform(image_orig.size, Image.PERSPECTIVE, quad, Image.BILINEAR)
+        paste = image_new.transform(image_orig.size, Image.PERSPECTIVE, inverse_transform, Image.BILINEAR)
         image_orig.paste(paste, (0, 0), mask=paste)
         image_orig = V(image_orig)[:, :, :3]
         return image_orig
 
-    def uncrop_video(self, video_path: str, crops_root, video_new: str):
+    def uncrop_video(self, video_path: str, crops_root, video_new: Union[str, ARRAYS]) -> ARRAYS:
+
+        class DummyVid:
+
+            def count_frames(self):
+                return len(self.lst)
+
+            def get_data(self, i):
+                return self.lst[i]
+
+            def __init__(self, lst):
+                self.lst = lst
+
+
         vid_orig = imageio.get_reader(f"{video_path}", 'ffmpeg')
-        vid_new = imageio.get_reader(f"{video_new}", 'ffmpeg')
+        if type(video_new) is str:
+            vid_new = imageio.get_reader(f"{video_new}", 'ffmpeg')
+        else:
+            vid_new = DummyVid(video_new)
         quads = files_utils.load_np(f'{crops_root}/quads')
 
         num_frames = min(vid_orig.count_frames(), vid_new.count_frames())
@@ -204,11 +237,12 @@ class FaceAlign:
         for i in range(num_frames):
             quad = quads[i]
             frame_orig, frame_new = vid_orig.get_data(i), vid_new.get_data(i)
-            image_size = frame_new.shape[0]
             pasted = self.paste_image(quad, frame_new, frame_orig)
+            seq_paste.append(pasted)
+        return seq_paste
 
     def __init__(self):
-        self.predictor = dlib.shape_predictor("./weights/ffhq/shape_predictor_68_face_landmarks.dat")
+        self.predictor = dlib.shape_predictor(f"{constants.PROJECT_ROOT}/weights/ffhq/shape_predictor_68_face_landmarks.dat")
         self.detector = dlib.get_frontal_face_detector()
         self.fa = None
         self.logger = train_utils.Logger()
@@ -217,12 +251,16 @@ class FaceAlign:
 
 if __name__ == '__main__':
     aligner = FaceAlign()
-    aligner.uncrop_video(f"/mnt/r/projects/facesimile/shots/101/purpledino_genwoman/comp_wip/images/comp_main_publish_qt/101_purpledino_genwoman_comp_v010.mov",
-                         f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v010", f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v010/orig_align.mp4")
-    # aligner.crop_video(f"/mnt/r/projects/facesimile/shots/101/purpledino_genwoman/comp_wip/images/comp_main_publish_qt/101_purpledino_genwoman_comp_v010.mov",
-    #                    f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v010", 10000)
+    # aligner.uncrop_video(f"/mnt/r/projects/facesimile/shots/101/purpledino_genwoman/comp_wip/images/comp_main_publish_qt/101_purpledino_genwoman_comp_v010.mov",
+    #                      f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v010", f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v010/orig_align.mp4")
+    # aligner.crop_video(f"/mnt/r/projects/facesimile/shots/101/purpledino_genwoman/comp_wip/images/comp_main_publish_qt/101_purpledino_genwoman_comp_v017.mov",
+    #                    f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v017", 100)
 
-    # crop_video(f"{constants.DATA_ROOT}/raw_videos/obama_062814", 30, f"{constants.DATA_ROOT}/processed")
+    aligner.crop_video(f"{constants.DATA_ROOT}/raw_videos/101_purpledino_front_comp_v019.mov",
+        f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v017", 100)
+
+
+    # aligner.crop_video(f"{constants.DATA_ROOT}/raw_videos/obama_062814.mp4", f"{constants.DATA_ROOT}/obama", 30)
     # viseme2vec(f"{constants.DATA_ROOT}/raw_videos/obama_062814",
     #             f"{constants.DATA_ROOT}/processed/viseme_obama_062814",
     #            f"{constants.DATA_ROOT}/processed/viseme_vec_obama_062814")

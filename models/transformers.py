@@ -1,3 +1,5 @@
+import torch
+
 from custom_types import *
 
 
@@ -146,3 +148,36 @@ class CombTransformer(nn.Module):
         super(CombTransformer, self).__init__()
         self.layers = nn.ModuleList([CrossTransformerLayer(dim_self, dim_ref, num_heads, mlp_ratio, act=act,
                                                            norm_layer=norm_layer) for _ in range(num_layers)])
+
+
+class VisionTransformer(nn.Module):
+
+    def forward(self, x: torch.Tensor):
+        x = self.conv1(x)
+        x = x.reshape(x.shape[0], x.shape[1], -1)
+        x = x.permute(0, 2, 1)
+        if self.extra_token:
+            x = torch.cat((torch.zeros(x.shape[0], 1, x.shape[2], device=x.device), x), dim=1)
+        x = x + self.positional_embedding
+        x = self.ln_pre(x)
+        x = self.transformer(x)
+        return x
+
+    def __init__(self, input_resolution: int, patch_size: int, hidden_dim: int, layers: int, heads: int,
+                 input_dim: int, extra_token=False):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.conv1 = nn.Conv2d(in_channels=input_dim, out_channels=hidden_dim, kernel_size=(patch_size, patch_size),
+                               stride=(patch_size, patch_size), bias=False)
+
+        scale = hidden_dim ** -0.5
+        self.extra_token = extra_token
+        self.positional_embedding = nn.Parameter(torch.randn((input_resolution // patch_size) ** 2 + int(extra_token), hidden_dim) * scale)
+        self.ln_pre = nn.LayerNorm(hidden_dim)
+        self.transformer = Transformer(hidden_dim, heads, layers)
+
+
+if __name__ == '__main__':
+    model = VisionTransformer(128, 16, 512, 6, 8, 3, True)
+    x = torch.rand(5, 3, 128, 128)
+    out = model(x)

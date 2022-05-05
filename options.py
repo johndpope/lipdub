@@ -72,9 +72,58 @@ class OptionsDisentanglementViseme(BaseOptions):
 
     def __init__(self, **kwargs):
         super(OptionsDisentanglementViseme, self).__init__(**kwargs)
-        self.tag = 'DisentanglementE4E'
+        self.tag = 'disentanglement_fixed'
         self.num_heads = 8
         self.num_layers = 6
+        self.lambda_identity_reg = .5
+        self.fill_args(kwargs)
+
+
+class OptionsVisemeClassifier(BaseOptions):
+
+    @property
+    def model_name(self) -> str:
+        return 'viseme_classifier'
+
+    def fill_args(self, args):
+        for arg in args:
+            if hasattr(self, arg):
+                setattr(self, arg, args[arg])
+
+    def __init__(self, **kwargs):
+        super(OptionsVisemeClassifier, self).__init__(**kwargs)
+        self.tag = 'base'
+        self.num_heads = 8
+        self.num_layers = 6
+        self.hidden_dim = 512
+        self.batch_size = 128
+        self.fill_args(kwargs)
+
+
+class OptionsVisemeUnet(BaseOptions):
+
+    @property
+    def model_name(self) -> str:
+        return 'unet'
+
+    def fill_args(self, args):
+        for arg in args:
+            if hasattr(self, arg):
+                setattr(self, arg, args[arg])
+
+    def __init__(self, **kwargs):
+        super(OptionsVisemeUnet, self).__init__(**kwargs)
+        self.tag = 'triple_decoder'
+        self.blocks = 3
+        self.depth = 5
+        self.res = 512
+        self.batch_size = 10
+        self.conditional_dim = 512
+        self.classification_loss = 0
+        self.train_viseme_encoder = True
+        self.train_mask_decoder = True
+        self.train_lips_decoder = True
+        self.norm_type = 'instant'
         self.fill_args(kwargs)
 
 class OptionsA2S(BaseOptions):
@@ -124,7 +173,8 @@ class OptionsSC(BaseOptions):
 
 
 def backward_compatibility(opt: BaseOptions) -> BaseOptions:
-    defaults = {}
+    defaults = {'train_viseme_encoder': False, 'train_mask_decoder': False,
+                'train_lips_decoder': False, 'norm_type': 'batch'}
     for key, item in defaults.items():
         if not hasattr(opt, key):
             setattr(opt, key, item)

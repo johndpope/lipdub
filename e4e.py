@@ -57,7 +57,7 @@ class E4E:
     def encode(self, image):
         if image.shape[2] != self.resize_dims[0]:
             image = nnf.interpolate(image, self.resize_dims)
-        latents = self.net.encoder(image)
+        latents = self.net.encode(image)
         return latents
 
     def decode(self, w_plus):
