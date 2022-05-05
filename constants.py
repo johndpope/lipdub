@@ -21,6 +21,8 @@ stylegan_weights = f'{PROJECT_ROOT}/weights/ffhq/stylegan2-ffhq-config-f.pt'
 MNT_ROOT = f'{DATA_ROOT}dubbing/'
 LRS2_PROCESS = f'{MNT_ROOT}lrs2_process/'
 LRS2_ROOT = f'/home/ahertz/Downloads/mvlrs_v1/main'
+FaceForensicsRoot = f'{MNT_ROOT}FaceForensics/'
+
 
 COLORS = [[231, 231, 91], [103, 157, 200], [177, 116, 76], [88, 164, 149],
          [236, 150, 130], [80, 176, 70], [108, 136, 66], [78, 78, 75],

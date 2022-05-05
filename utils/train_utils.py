@@ -3,16 +3,11 @@ import constants
 from tqdm import tqdm
 from utils import files_utils
 import os
-from models import audio2style, models_utils, style_correct, viseme_disentanglement_model, untet_model
+from models import models_utils
 import options
 
 
 LI = Union[T, float, int]
-Models = {'audio2style': audio2style.Audio2Style,
-          'style_correct': style_correct.StyleCorrect,
-          'disentanglement_viseme': viseme_disentanglement_model.VisemeDisentanglement,
-          'viseme_classifier': viseme_disentanglement_model.VisemeClassifier,
-          'unet': untet_model.UnetEncoderDecoder}
 
 
 def is_model_clean(model: nn.Module) -> bool:
@@ -23,6 +18,13 @@ def is_model_clean(model: nn.Module) -> bool:
 
 
 def model_factory(opt: options.BaseOptions, override_model: Optional[str], device: D) -> models_utils.Model:
+    from models import audio2style, style_correct, viseme_disentanglement_model, untet_model
+    Models = {'audio2style': audio2style.Audio2Style,
+              'style_correct': style_correct.StyleCorrect,
+              'disentanglement_viseme': viseme_disentanglement_model.VisemeDisentanglement,
+              'viseme_classifier': viseme_disentanglement_model.VisemeClassifier,
+              'unet': untet_model.UnetEncoderDecoder}
+
     if override_model is None:
         return Models[opt.model_name](opt).to(device)
     return Models[override_model](opt).to(device)

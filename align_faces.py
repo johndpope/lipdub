@@ -12,9 +12,7 @@ import constants
 import ffmpeg
 
 
-IMAGE_SIZE = 1024
-
-def crop_image(filepath, quad, enable_padding=False):
+def crop_image(filepath, quad, enable_padding=False, image_size=1024):
     x = (quad[3] - quad[1]) / 2
     qsize = np.hypot(*x) * 2
     # read image
@@ -24,9 +22,9 @@ def crop_image(filepath, quad, enable_padding=False):
         img = PIL.Image.fromarray(filepath)
     else:
         img = PIL.Image.open(filepath)
-    transform_size = IMAGE_SIZE
+    transform_size = image_size
     # Shrink.
-    shrink = int(np.floor(qsize / IMAGE_SIZE * 0.5))
+    shrink = int(np.floor(qsize / image_size * 0.5))
     if shrink > 1:
         rsize = (int(np.rint(float(img.size[0]) / shrink)), int(np.rint(float(img.size[1]) / shrink)))
         img = img.resize(rsize, PIL.Image.ANTIALIAS)
@@ -60,8 +58,8 @@ def crop_image(filepath, quad, enable_padding=False):
         quad += pad[:2]
     # Transform.
     img = img.transform((transform_size, transform_size), PIL.Image.QUAD, (quad + 0.5).flatten(), PIL.Image.BILINEAR)
-    if IMAGE_SIZE < transform_size:
-        img = img.resize((IMAGE_SIZE, IMAGE_SIZE), PIL.Image.ANTIALIAS)
+    if image_size < transform_size:
+        img = img.resize((image_size, image_size), PIL.Image.ANTIALIAS)
     return img
 
 
@@ -136,7 +134,7 @@ class FaceAlign:
         x *= scale
         y = np.flipud(x) * [-1, 1]
         c = eye_avg + eye_to_mouth * 0.1
-        return c, x, y
+        return lm, c, x, y
 
     def crop_faces_by_quads(self, vid, quads):
         orig_images, crops = [], []
@@ -150,12 +148,19 @@ class FaceAlign:
         self.logger.stop()
         return crops, orig_images
 
+    def crop_face(self, frame, image_size=1024):
+        lm, c, x, y = self.compute_transform(frame, scale=1.)
+        quad = V([c - x - y, c - x + y, c + x + y, c + x - y])
+        crop = V(crop_image(frame, quad.copy(), image_size=image_size))
+        lm_crop = self.compute_transform(crop, scale=1.)[0]
+        return crop, quad, lm, lm_crop
+
     def crop_faces(self, vid, num_frames, scale=1., center_sigma=1., xy_sigma=3.0, use_fa=False):
         cs, xs, ys = [], [], []
         self.logger.start(num_frames)
         for i in range(num_frames):
             frame = vid.get_data(i)
-            c, x, y = self.compute_transform(frame, scale=scale)
+            lm, c, x, y = self.compute_transform(frame, scale=scale)
             cs.append(c)
             xs.append(x)
             ys.append(y)
@@ -223,7 +228,6 @@ class FaceAlign:
 
             def __init__(self, lst):
                 self.lst = lst
-
 
         vid_orig = imageio.get_reader(f"{video_path}", 'ffmpeg')
         if type(video_new) is str:
