@@ -80,7 +80,7 @@ def split_path(path: str) -> List[str]:
     extension = os.path.splitext(path)[1]
     dir_name, name = os.path.split(path)
     name = name[: len(name) - len(extension)]
-    return [dir_name, name, extension]
+    return [dir_name + '/', name, extension]
 
 
 def init_folders(*folders):
@@ -131,9 +131,6 @@ def load_image(path: str, color_type: str = 'RGB') -> ARRAY:
             break
     image = Image.open(path).convert(color_type)
     return V(image)
-
-
-
 
 
 def save_np(arr_or_dict: Union[ARRAY, T, dict], path: str):

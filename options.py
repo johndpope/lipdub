@@ -2,6 +2,8 @@ from __future__ import annotations
 import abc
 import os
 import pickle
+
+import constants
 import constants as const
 from custom_types import *
 
@@ -100,16 +102,49 @@ class OptionsVisemeClassifier(BaseOptions):
         self.fill_args(kwargs)
 
 
+class OptionsLipsDetection(BaseOptions):
+
+    @property
+    def model_name(self) -> str:
+        return 'lips_detection'
+
+    def __init__(self, **kwargs):
+        super(OptionsLipsDetection, self).__init__(**kwargs)
+        self.tag = 'vit'
+        self.batch_size = 128
+        self.patch_size = 15
+        self.hidden_dim = 768
+        self.num_layers = 8
+        self.num_heads = 8
+        self.data_dir = f'{constants.FaceForensicsRoot}processed_frames/'
+        self.fill_args(kwargs)
+
+
+class OptionsLipsGenerator(BaseOptions):
+
+    @property
+    def model_name(self) -> str:
+        return 'conditional_lips_generator'
+
+    def __init__(self, **kwargs):
+        super(OptionsLipsGenerator, self).__init__(**kwargs)
+        self.tag = 'obama'
+        self.data_dir = constants.MNT_ROOT + 'video_frames/obama/'
+        self.batch_size = 6
+        self.num_layers = 8
+        self.num_heads = 8
+        self.reg_lips = 1.
+        self.unpaired = 10.
+        self.pretrained_path = f'{constants.CHECKPOINTS_ROOT}conditional_lips_generator_all/model.pt'
+        self.fill_args(kwargs)
+
+
 class OptionsVisemeUnet(BaseOptions):
 
     @property
     def model_name(self) -> str:
         return 'unet'
 
-    def fill_args(self, args):
-        for arg in args:
-            if hasattr(self, arg):
-                setattr(self, arg, args[arg])
 
     def __init__(self, **kwargs):
         super(OptionsVisemeUnet, self).__init__(**kwargs)
@@ -125,6 +160,7 @@ class OptionsVisemeUnet(BaseOptions):
         self.train_lips_decoder = True
         self.norm_type = 'instant'
         self.fill_args(kwargs)
+
 
 class OptionsA2S(BaseOptions):
 
@@ -174,7 +210,10 @@ class OptionsSC(BaseOptions):
 
 def backward_compatibility(opt: BaseOptions) -> BaseOptions:
     defaults = {'train_viseme_encoder': False, 'train_mask_decoder': False,
-                'train_lips_decoder': False, 'norm_type': 'batch'}
+                'train_lips_decoder': False, 'norm_type': 'batch',
+                'data_dir': f'{constants.FaceForensicsRoot}processed_frames/',
+                'reg_lips': 1., 'unpaired': 0, 'pretrained_path': ''
+    }
     for key, item in defaults.items():
         if not hasattr(opt, key):
             setattr(opt, key, item)

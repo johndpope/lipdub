@@ -18,12 +18,14 @@ def is_model_clean(model: nn.Module) -> bool:
 
 
 def model_factory(opt: options.BaseOptions, override_model: Optional[str], device: D) -> models_utils.Model:
-    from models import audio2style, style_correct, viseme_disentanglement_model, untet_model
+    from models import audio2style, style_correct, viseme_disentanglement_model, untet_model, lips_detection_model
     Models = {'audio2style': audio2style.Audio2Style,
               'style_correct': style_correct.StyleCorrect,
               'disentanglement_viseme': viseme_disentanglement_model.VisemeDisentanglement,
               'viseme_classifier': viseme_disentanglement_model.VisemeClassifier,
-              'unet': untet_model.UnetEncoderDecoder}
+              'unet': untet_model.UnetEncoderDecoder,
+              'lips_detection': lips_detection_model.LipsDetectionModel,
+              'conditional_lips_generator': lips_detection_model.ConditionalLipsGenerator}
 
     if override_model is None:
         return Models[opt.model_name](opt).to(device)
