@@ -2,6 +2,7 @@ from custom_types import *
 from train import train_disentanglement
 from options import OptionsDisentanglementViseme
 from utils import files_utils
+from models import models_utils
 import constants
 
 
@@ -12,7 +13,7 @@ class VisemePtiDS(Dataset):
         image = torch.from_numpy(image).float()
         image = image / 127.5 - 1
         image = image.permute(2, 0, 1)
-        return image
+        return image, self.w[item]
 
     def __len__(self):
         return len(self.paths)
@@ -20,6 +21,7 @@ class VisemePtiDS(Dataset):
     def __init__(self, root: str, max_num_frames):
         paths = files_utils.collect(root, '.npy')
         self.paths = [path for path in paths if 'crop_' in path[1] or 'image_' in path[1]]
+        self.w = files_utils.load_pickle(f"{root}/e4e_w_plus.pkl")[:, 0]
         if max_num_frames < len(self.paths):
             self.paths = self.path[:max_num_frames]
 
@@ -32,16 +34,30 @@ class PtiWithDisentanglement(train_disentanglement.TrainVisemeDisentanglement):
                         batch_size=4 if DEBUG else self.opt.batch_size)
         return ds, dl
 
+    def load(self):
+        files_utils.load_model(self.stylegan, f'{self.opt.cp_folder}/pti/{self.video_name}', self.device)
+
+    @models_utils.torch_no_grad
+    def show(self):
+        self.load()
+        self.stylegan.eval()
+        for i in range(10):
+            images, w_drive = self.prepare_data(self.dataset[i * 10])
+            w_drive = w_drive.unsqueeze(0)
+            out = self.model.pti_forward(w_drive, w_drive, self.stylegan)[0].cpu()
+            image = torch.cat((images.cpu(), out), dim=2)
+            files_utils.imshow(image)
+
     def between_epochs(self, epoch, scores):
         if scores['loss'] < self.best_score:
             self.best_score = scores['loss']
             files_utils.save_model(self.stylegan, f'{self.opt.cp_folder}/pti/{self.video_name}')
 
     def train_iter(self, data):
-        images = self.prepare_data(data)
-        with torch.no_grad():
-            w_drive = w_base = self.e4e.encode(images)
-        out = self.model.pti_forward(w_base, w_drive, self.stylegan)
+        images, w_drive = self.prepare_data(data)
+        # with torch.no_grad():
+        #     w_drive = w_base = self.e4e.encode(images)
+        out = self.model.pti_forward(w_drive, w_drive, self.stylegan)
         loss = self.get_loss(out, images)
         loss.backward()
         self.optimizer.step()
@@ -55,12 +71,16 @@ class PtiWithDisentanglement(train_disentanglement.TrainVisemeDisentanglement):
         self.base_training = False
         self.stylegan.train(True)
         self.model.eval()
-        self.optimizer = Optimizer(self.stylegan.parameters(),  betas=(.9, 0.999), lr=3e-5)
+        self.optimizer = Optimizer(self.stylegan.parameters(),  betas=(.9, 0.999), lr=2e-5)
 
 
 def main():
+    print("main")
     trainer = PtiWithDisentanglement(OptionsDisentanglementViseme().load(), f'{constants.DATA_ROOT}/processed/',
-                                      'obama', 1000)
+                                     'obama', 1000)
+
+    # trainer.vid2vid(f'{constants.DATA_ROOT}/processed/', f'{constants.DATA_ROOT}101_purpledino_front_comp_v019_crop/')
+    # trainer.show()
     trainer.train()
 
 

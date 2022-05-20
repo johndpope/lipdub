@@ -1,5 +1,3 @@
-import torch
-
 from custom_types import *
 
 

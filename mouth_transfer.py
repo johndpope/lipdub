@@ -6,7 +6,7 @@ import mediapipe as mp
 import constants
 import cv2
 import process_video
-import e4e
+# import e4e
 
 
 FACEMESH_LIPS = V([(291, 409), (409, 270), (270, 269), (269, 267), (267, 0), (0, 37), (37, 39), (39, 40), (40, 185), (185, 61), (61, 146), (146, 91), (91, 181), (181, 84), (84, 17),
@@ -66,14 +66,15 @@ def masked_ada_in(x, y, mask_x, mask_y):
     return out
 
 
-def get_lips(image, landmarks, select):
+def get_lips(image, landmarks, select, to_torch: bool = True):
     # landmark_arr = landmarks_to_arr(landmarks, image)
     contour = landmarks[:, 0]
     points = landmarks[select][:, 0]
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     mask = cv2.fillPoly(mask, [np.roll(points, 1, -1).astype(np.int32)], True,  255)
-    mask = torch.from_numpy(mask)
-    mask = mask.view(1, 1, *mask.shape).float()
+    if to_torch:
+        mask = torch.from_numpy(mask)
+        mask = mask.view(1, 1, *mask.shape).float()
     return mask, points
 
 
@@ -363,6 +364,46 @@ def video2image(name_mouth):
         return
 
 
+@models_utils.torch_no_grad
+def generate_masks():
+
+    def get_lips_mask():
+        nonlocal image
+        mp_face_mesh = mp.solutions.face_mesh
+        with mp_face_mesh.FaceMesh(
+                static_image_mode=True,
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.5) as face_mesh:
+            results = face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).multi_face_landmarks
+            if results is None:
+                print('error')
+                return None, None
+
+            else:
+                TargetMouth.cache = results = \
+                face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).multi_face_landmarks[0].landmark
+
+        landmark_arr = landmarks_to_arr(results, image)
+        lips, _ = get_lips(image, landmark_arr, FACEMESH_LIPS, to_torch=False)
+
+        return lips.astype(np.bool_)
+
+    out_root = f"{constants.MNT_ROOT}/viseme_pairs_ds/"
+    paths = files_utils.collect(out_root, '.png')
+    logger = train_utils.Logger().start(len(paths))
+    for path in paths:
+        image = files_utils.load_image(''.join(path))
+        lips = get_lips_mask()
+        if lips is not None:
+            files_utils.save_np(lips, f'{path[0]}{path[1]}_lips')
+        logger.reset_iter()
+    logger.stop()
+
+
+
+
+
 def main():
     folder_mouth = f'/home/ahertz/projects/StyleFusion-main/assets/101_beigefox_front_comp_v017/'
     folder_image = f'/home/ahertz/projects/StyleFusion-main/assets/processed/'
@@ -414,4 +455,4 @@ def main():
 
 
 if __name__ == '__main__':
-    viseme2id()
+    generate_masks()

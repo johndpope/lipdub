@@ -5,6 +5,7 @@ from utils import files_utils
 import os
 from models import models_utils
 import options
+import importlib
 
 
 LI = Union[T, float, int]
@@ -18,18 +19,30 @@ def is_model_clean(model: nn.Module) -> bool:
 
 
 def model_factory(opt: options.BaseOptions, override_model: Optional[str], device: D) -> models_utils.Model:
-    from models import audio2style, style_correct, viseme_disentanglement_model, untet_model, lips_detection_model
-    Models = {'audio2style': audio2style.Audio2Style,
-              'style_correct': style_correct.StyleCorrect,
-              'disentanglement_viseme': viseme_disentanglement_model.VisemeDisentanglement,
-              'viseme_classifier': viseme_disentanglement_model.VisemeClassifier,
-              'unet': untet_model.UnetEncoderDecoder,
-              'lips_detection': lips_detection_model.LipsDetectionModel,
-              'conditional_lips_generator': lips_detection_model.ConditionalLipsGenerator}
+    Models = {
+        'audio2style':
+            {'module': 'models.audio2style', 'class_name': 'Audio2Style'},
+        'style_correct':
+            {'module': 'models.style_correct', 'class_name': 'StyleCorrect'},
+        'disentanglement_viseme':
+            {'module': 'models.viseme_disentanglement_model', 'class_name': 'VisemeDisentanglement'},
+        'viseme_classifier':
+            {'module': 'models.viseme_disentanglement_model', 'class_name': 'VisemeClassifier'},
+        'unet':
+            {'module': 'models.untet_model', 'class_name': 'UnetEncoderDecoder'},
+        'lips_detection':
+            {'module': 'models.lips_detection_model', 'class_name': 'LipsDetectionModel'},
+        'conditional_lips_generator':
+            {'module': 'models.lips_detection_model', 'class_name': 'ConditionalLipsGenerator'},
+        'seq_lips_generator':
+            {'module': 'models.lips_detection_model', 'class_name': 'LipsGeneratorSeq'}
+    }
 
-    if override_model is None:
-        return Models[opt.model_name](opt).to(device)
-    return Models[override_model](opt).to(device)
+    model_name = opt.model_name if override_model is None else override_model
+    module = importlib.import_module(Models[model_name]['module'])
+    model_cls = getattr(module, Models[model_name]['class_name'])
+    return model_cls(opt).to(device)
+
 
 
 def load_model(opt, device, suffix: str = '', override_model: Optional[str] = None) -> models_utils.Model:

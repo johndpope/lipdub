@@ -5,12 +5,16 @@ from torch import nn
 from torch.nn import functional as F
 from torch.autograd import Function
 from torch.utils.cpp_extension import load
-
+from constants import IS_PYCHARM
 
 module_path = os.path.dirname(__file__)
+
+name_fused = "fused"
+if IS_PYCHARM:
+    name_fused = "fused_pc"
 try:
     fused = load(
-        "fused",
+        name_fused,
         sources=[
             os.path.join(module_path, "fused_bias_act.cpp"),
             os.path.join(module_path, "fused_bias_act_kernel.cu"),

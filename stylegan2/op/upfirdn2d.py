@@ -5,13 +5,15 @@ import torch
 from torch.nn import functional as F
 from torch.autograd import Function
 from torch.utils.cpp_extension import load
-
+from constants import IS_PYCHARM
 
 module_path = os.path.dirname(__file__)
-
+name_upfirdn2d = "upfirdn2d"
+if IS_PYCHARM:
+    name_upfirdn2d = "upfirdn2d_pc"
 try:
     upfirdn2d_op = load(
-        "upfirdn2d",
+        name_upfirdn2d,
         sources=[
             os.path.join(module_path, "upfirdn2d.cpp"),
             os.path.join(module_path, "upfirdn2d_kernel.cu"),

@@ -38,16 +38,13 @@ class TrainVisemeDisentanglement:
             image = files_utils.image_to_display(image)
             files_utils.imshow(image)
 
-    def prep_process_infer(self, path_base, path_driving):
-        image_base = self.e4e.prepare_image(''.join(path_base), is_np=True).to(self.device)
-        image_driving = files_utils.load_np(''.join(path_driving))
-        image_driving = torch.from_numpy(image_driving).float() / 127.5 - 1
-        image_driving = image_driving.cuda().unsqueeze(0).permute(0, 3, 1, 2)
-        # w_drive = image_driving[:, :, 512:, 256: 768]
-        # w_drive = nnf.interpolate(w_drive, (128, 128))
-        w_base = self.e4e.encode(image_base)
-        w_drive =  self.e4e.encode(image_driving)
-        return w_base, w_drive, image_base, image_driving
+    def prep_process_infer(self, *paths):
+        out = []
+        for path in paths:
+            image = self.e4e.prepare_image(''.join(path), is_np=True).to(self.device)
+            w = self.e4e.encode(image)
+            out += [w, image]
+        return out
 
     def load(self):
         files_utils.load_model(self.stylegan, f'{constants.CHECKPOINTS_ROOT}/pti/obama_a', self.device)
@@ -101,7 +98,7 @@ class TrainVisemeDisentanglement:
         vid_len = min(len(images_driving), len(images_base))
         self.logger.start(vid_len)
         for path_base, path_driving in zip(images_base, images_driving):
-            w_base, w_drive, base_image_in, driven_image_in = self.prep_process_infer(path_base, path_driving)
+            w_base, base_image_in, w_drive, driven_image_in = self.prep_process_infer(path_base, path_driving)
             out_ = self.model(w_base, w_drive, self.stylegan, True).cpu()
             # image = [nnf.interpolate(image, (256, 256)) for image in (base_image_in, driven_image_in, out_)]
             # image = torch.cat(image, dim=3)[0]
@@ -112,7 +109,7 @@ class TrainVisemeDisentanglement:
         self.logger.start(vid_len)
         self.load()
         for i, (path_base, path_driving) in enumerate(zip(images_base, images_driving)):
-            w_base, w_drive, base_image_in, driven_image_in = self.prep_process_infer(path_base, path_driving)
+            w_base, base_image_in, w_drive, driven_image_in = self.prep_process_infer(path_base, path_driving)
             out_ = self.model(w_base, w_drive, self.stylegan, True)
             out_align.append(files_utils.image_to_display(out_))
             image = [nnf.interpolate(image, (256, 256)).cpu() for image in (base_image_in, driven_image_in, out[i], out_, )]
@@ -125,6 +122,31 @@ class TrainVisemeDisentanglement:
         align = align_faces.FaceAlign()
         out_align = align.uncrop_video(f"{constants.DATA_ROOT}/raw_videos/obama_062814.mp4", base_folder, out_align)
         self.finalize_video(out_align, driving_folder, name + '_align')
+
+    @models_utils.torch_no_grad
+    def vid2vid_single(self, driving_folder, max_frames = -1):
+        self.model.eval()
+        self.stylegan.eval()
+        name = driving_folder.split('/')[-2]
+        images_driving = files_utils.collect(driving_folder, '.npy')
+        if  -1 < max_frames < len(images_driving):
+            images_driving = images_driving[:max_frames]
+        images_driving = [path for path in images_driving if 'image_' in path[1] or 'crop_' in path[1]]
+        out = []
+        vid_len = len(images_driving)
+        self.logger.start(vid_len)
+        w_base = self.dataset.w_base[torch.randint(len(self.dataset), (1,)).item()].clone().cuda().unsqueeze(0)
+        for path_driving in images_driving:
+            w_drive, driven_image_in = self.prep_process_infer(path_driving)
+            out_ = self.model(w_base, w_drive, self.stylegan, True).cpu()
+            image = [nnf.interpolate(image, (256, 256)).cpu() for image in (driven_image_in, out_)]
+            image = torch.cat(image, dim=3)[0]
+            image = files_utils.image_to_display(image)
+            out.append(image)
+            self.logger.reset_iter()
+        self.logger.stop()
+        self.logger.start(vid_len)
+        self.finalize_video(out, driving_folder, name)
 
 
     def get_loss(self, predict, gt):
@@ -202,8 +224,8 @@ def main():
     # model.train()
     # model.view()
     #
-    model.vid2vid_ds()
-    # model.vid2vid(f'{constants.DATA_ROOT}/processed/', f'{constants.DATA_ROOT}101_purpledino_front_comp_v019/')
+    # model.vid2vid_ds()
+    model.vid2vid_single(f'{constants.DATA_ROOT}obama/', 300)
 
 
 if __name__ == '__main__':

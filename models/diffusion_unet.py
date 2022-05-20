@@ -312,7 +312,7 @@ class BeatGANsUNetModel(nn.Module):
         k = 0
         for i in range(len(self.input_num_blocks)):
             for j in range(self.input_num_blocks[i]):
-                h = self.input_blocks[k](h, emb=emb)
+                h = self.input_blocks[k](h, emb=emb, cond=t)
                 # print(i, j, h.shape)
                 hs[i].append(h)
                 k += 1
@@ -330,7 +330,7 @@ class BeatGANsUNetModel(nn.Module):
                 except IndexError:
                     lateral = None
                     # print(i, j, lateral)
-                h = self.output_blocks[k](h, emb=emb, lateral=lateral)
+                h = self.output_blocks[k](h, emb=emb, cond=t, lateral=lateral)
                 k += 1
 
         h = h.type(x.dtype)

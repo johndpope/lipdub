@@ -1,7 +1,8 @@
+import options
 from custom_types import *
 from models.diffusion_choises import *
 from models.diffusion_config import BaseConfig
-from models.diffusion_auto_encoder import BeatGANsAutoencConfig
+from models.diffusion_auto_encoder import BeatGANsAutoencConfig, BeatGANsEncoderConfig
 from models.diffusion_unet import BeatGANsUNetModel
 from models.diffusion_blocks import ScaleAt
 
@@ -117,10 +118,9 @@ class TrainConfig(BaseConfig):
     use_cache_dataset: bool = False
     # to be overridden
     name: str = ''
+    in_channels = 3
+    model_out_channels = 3
 
-    @property
-    def model_out_channels(self):
-        return 3
 
     def make_model_conf(self):
         if self.model_name in [
@@ -148,7 +148,7 @@ class TrainConfig(BaseConfig):
                 enc_grad_checkpoint=self.net_enc_grad_checkpoint,
                 enc_attn_resolutions=self.net_enc_attn,
                 image_size=self.img_size,
-                in_channels=3,
+                in_channels=self.in_channels,
                 model_channels=self.net_ch,
                 num_classes=None,
                 num_head_channels=-1,
@@ -212,15 +212,49 @@ def ffhq128_autoenc_base():
     conf.eval_ema_every_samples = 10_000_000
     conf.eval_every_samples = 10_000_000
     conf.make_model_conf()
+
     return conf
 
 
-def ffhq256_autoenc():
+def ffhq128_autoenc(opt):
+    conf = autoenc_base()
+    conf.data_name = 'ffhqlmdb256'
+    conf.img_size = 128
+    if opt.is_light:
+        conf.net_ch = 64
+        conf.net_num_res_blocks = 1
+        conf.net_enc_num_res_blocks = 1
+        conf.net_ch_mult = (1, 2, 4, 4, 8)
+        conf.net_enc_channel_mult = (1, 2, 4, 4, 8, 8)
+    else:
+        conf.net_ch = 128
+        # final resolution = 8x8
+        conf.net_ch_mult = (1, 1, 2, 3, 4)
+        # final resolution = 4x4
+        conf.net_enc_channel_mult = (1, 1, 2, 3, 4, 4)
+    conf.in_channels = opt.image_seq * 3
+    conf.model_out_channels = opt.image_seq * 3
+    conf.eval_ema_every_samples = 10_000_000
+    conf.eval_every_samples = 10_000_000
+    conf.make_model_conf()
+    return conf
+
+
+def ffhq256_autoenc(opt: options.OptionsLipsGenerator):
     conf = ffhq128_autoenc_base()
     conf.img_size = 256
-    conf.net_ch = 128
-    conf.net_ch_mult = (1, 1, 2, 2, 4, 4)
-    conf.net_enc_channel_mult = (1, 1, 2, 2, 4, 4, 4)
+    if opt.is_light:
+        conf.net_ch = 32
+        conf.net_num_res_blocks = 1
+        conf.net_enc_num_res_blocks = 1
+        conf.net_ch_mult = (1, 2, 2, 4, 4, 8)
+        conf.net_enc_channel_mult = (1, 2, 2, 4, 4, 8, 8)
+    else:
+        conf.net_ch = 128
+        conf.net_ch_mult = (1, 1, 2, 2, 4, 4)
+        conf.net_enc_channel_mult = (1, 1, 2, 2, 4, 4, 4)
+    if opt.concat_ref:
+        conf.in_channels = 6
     conf.eval_every_samples = 10_000_000
     conf.eval_ema_every_samples = 10_000_000
     conf.total_samples = 200_000_000
@@ -230,10 +264,42 @@ def ffhq256_autoenc():
     return conf
 
 
-def get_conditional_unet():
-    conf = ffhq256_autoenc()
+def get_conditional_unet(opt):
+    if opt.res == 256:
+        conf = ffhq256_autoenc(opt)
+    else:
+        conf = ffhq128_autoenc(opt)
     model = BeatGANsUNetModel(conf.model_conf)
     return model
+
+
+def get_visual_encoder(opt):
+    if opt.res == 256:
+        conf = ffhq256_autoenc(opt).model_conf
+    else:
+        conf = ffhq128_autoenc(opt).model_conf
+    return BeatGANsEncoderConfig(
+        image_size=conf.image_size,
+        in_channels=3,
+        model_channels=conf.model_channels,
+        out_hid_channels=conf.enc_out_channels,
+        out_channels=conf.enc_out_channels,
+        num_res_blocks=conf.enc_num_res_block,
+        attention_resolutions=(conf.enc_attn_resolutions
+                               or conf.attention_resolutions),
+        dropout=conf.dropout,
+        channel_mult=conf.enc_channel_mult or conf.channel_mult,
+        use_time_condition=False,
+        conv_resample=conf.conv_resample,
+        dims=conf.dims,
+        use_checkpoint=conf.use_checkpoint or conf.enc_grad_checkpoint,
+        num_heads=conf.num_heads,
+        num_head_channels=conf.num_head_channels,
+        resblock_updown=conf.resblock_updown,
+        use_new_attention_order=conf.use_new_attention_order,
+        pool=conf.enc_pool,
+    ).make_model()
+
 
 
 if __name__ == '__main__':

@@ -86,7 +86,7 @@ def gif_group(group, folder, interval, mp4=True, loop=0, reverse: bool = False):
     else:
         if type(interval) is not list:
             interval_ = [interval] * len(group)
-            interval_[0] = 1
+            # interval_[0] = 1
         else:
             interval_ = interval
         # interval_[-1] = 1
@@ -363,21 +363,29 @@ def make_row(images, padding):
     return full_image
 
 
-def simple_grid(rows, cols, padding, size, get_image):
-    if type(size) is int:
-        size = (size, size)
+def simple_grid(rows, cols, padding, get_image):
+    if type(padding) is int:
+        tmp = padding
+        padding = lambda x, y: tmp
+    size = get_image(0, 0).shape[:2]
     h, w = size
-    h_all = (h + padding) * rows - padding
-    w_all = (w + padding) * cols - padding
+    all_pads_h = [padding(i, 1) for i in range(rows - 1)]
+    all_pads_w = [padding(1, i) for i in range(cols - 1)]
+    h_all = h * rows + sum(all_pads_h)
+    w_all = w * cols + sum(all_pads_w)
     full_image = np.ones((h_all, w_all, 3), dtype=np.uint8) * 255
+    cur_h = 0
     for i in range(rows):
+        cur_w = 0
         for j in range(cols):
             image = get_image(i, j)
             if image.shape[0] != h or image.shape[1] != w:
                 image = PIL.Image.fromarray(image)
                 image = image.resize((w, h), resample=PIL.Image.BICUBIC)
                 image = V(image)
-            full_image[i * (h + padding): i * (h + padding) + h, j * (w + padding): j * (w + padding) + w] = image
+            full_image[cur_h: cur_h + h, cur_w: cur_w + w] = image
+            cur_w += w + padding(1, j)
+        cur_h += h + padding(i, 1)
     return full_image
 
     
@@ -462,13 +470,31 @@ def make_vid_collage():
     files_utils.save_image(image, '../assets/slide_munck/id_vis')
 
 
+
+def vid2gif(video_path, out_path, start, end, resize_len=-1):
+    vid = imageio.get_reader(video_path, 'ffmpeg')
+    fps = vid._meta['fps']
+    start_frame = int(start * fps)
+    end_frame = min(int(end * fps), vid.count_frames()-1)
+    data = [vid.get_data(i) for i in range(start_frame, end_frame) if i % 2 == 0]
+    if resize_len > 0:
+        data = [vid.get_data(i) for i in range(start_frame, end_frame)]
+        data = [resize(image, resize_len) for image in data]
+    data = [image[50:-10,20:-20] for image in data]
+    gif_group(data, out_path, 1/ fps, mp4=False)
+
+
+
 if __name__ == '__main__':
     import options
     # make_transition(r'C:\Users\hertz\PycharmProjects\sdf_gmm\assets\renders\chair_local_a/trial_279.png', r'C:\Users\hertz\PycharmProjects\sdf_gmm\assets\renders\chair_local_a/trial_280.png', 5)
     # inversion_gif(fr'{constants.DATA_ROOT}renders\mnt\amir\cache\evaluation\shapenet_chairs_wm_sphere_sym_test\nise_high_chairs_split_subset/')
     # gifed(r'C:\Users\hertz\PycharmProjects\sdf_gmm\assets\renders\int_airplanes/', .05, "airplane_int", loop=-1, reverse=False,
     #       is_alpha=True)
-    make_vid_collage()
+    # make_vid_collage()
+    vid2gif(r'C:\Users\hertz\Documents\SPAGHETTI/for_gifs.mp4',
+            r'C:\Users\hertz\Documents\SPAGHETTI/overview',
+            0, 100, 1920 // 2)
     # make_collage()
     # crop_white(r"C:\Users\hertz\Documents\COALESCE/", True, as_first=True)
     # make_collage()

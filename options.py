@@ -128,15 +128,42 @@ class OptionsLipsGenerator(BaseOptions):
 
     def __init__(self, **kwargs):
         super(OptionsLipsGenerator, self).__init__(**kwargs)
-        self.tag = 'obama'
-        self.data_dir = constants.MNT_ROOT + 'video_frames/obama/'
-        self.batch_size = 6
+        self.tag = 'all_encoder_light_cat'
+        self.data_dir = f'{constants.FaceForensicsRoot}processed_frames/'
+        self.batch_size = 24
         self.num_layers = 8
         self.num_heads = 8
-        self.reg_lips = 1.
-        self.unpaired = 10.
-        self.pretrained_path = f'{constants.CHECKPOINTS_ROOT}conditional_lips_generator_all/model.pt'
+        self.reg_lips = 10
+        self.reg_constructive = 0
+        self.unpaired = 0
+        self.num_ids = -1
+        self.train_visual_encoder = False
+        self.color_jitter = False
+        self.z_token = False
+        self.is_light = True
+        self.draw_lips_lines = True
+        self.reg_lips_center = 10
+        self.concat_ref = True
+        self.pretrained_tag = f''
+        self.reverse_input = False
+        self.res = 256
         self.fill_args(kwargs)
+
+
+class OptionsLipsGeneratorSeq(OptionsLipsGenerator):
+
+    @property
+    def model_name(self) -> str:
+        return 'seq_lips_generator'
+
+    def __init__(self, **kwargs):
+        super(OptionsLipsGeneratorSeq, self).__init__(**kwargs)
+        self.image_seq = 5
+        self.lips_seq = 11
+        self.res = 128
+        self.is_light = False
+        self.lr_decay_every = 1
+        self.data_dir = f'{constants.FaceForensicsRoot}processed_frames_all/'
 
 
 class OptionsVisemeUnet(BaseOptions):
@@ -212,8 +239,12 @@ def backward_compatibility(opt: BaseOptions) -> BaseOptions:
     defaults = {'train_viseme_encoder': False, 'train_mask_decoder': False,
                 'train_lips_decoder': False, 'norm_type': 'batch',
                 'data_dir': f'{constants.FaceForensicsRoot}processed_frames/',
-                'reg_lips': 1., 'unpaired': 0, 'pretrained_path': ''
-    }
+                'reg_lips': 1., 'unpaired': 0, 'pretrained_path': '',
+                'num_ids': -1, 'color_jitter': True,  'z_token': False,
+                'is_light': False, 'train_visual_encoder': False, 'draw_lips_lines': False,
+                'reg_lips_center': 0, 'reg_constructive': 0, 'reverse_input': False, 'concat_ref': False,
+                'res': 256
+                }
     for key, item in defaults.items():
         if not hasattr(opt, key):
             setattr(opt, key, item)

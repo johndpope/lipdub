@@ -501,19 +501,26 @@ def export_ply(mesh: T_Mesh, path: str, colors: T):
 
 
 @path_init('', 1, True)
-def save_model(model: Union[Optimizer, nn.Module], model_path: str):
+def save_model(model: Union[Optimizer, nn.Module, T], model_path: str):
     if const.DEBUG:
         return
-    init_folders(model_path)
-    torch.save(model.state_dict(), model_path)
+    if type(model) is T:
+        state = model
+    else:
+        state = model.state_dict()
+    torch.save(state, model_path)
 
 
-def load_model(model: Union[Optimizer, nn.Module], model_path: str, device: D, verbose: bool = False):
+def load_model(model: Optional[Union[Optimizer, nn.Module]], model_path: str, device: D, verbose: bool = False):
     if os.path.isfile(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        state = torch.load(model_path, map_location=device)
+        if model is not None:
+            model.load_state_dict(state)
+        else:
+            model = state
         if verbose:
             print(f'loading {type(model).__name__} from {model_path}')
-    elif verbose:
+    elif verbose and model is not None:
         print(f'init {type(model).__name__}')
     return model
 
