@@ -130,7 +130,7 @@ class OptionsLipsGenerator(BaseOptions):
         super(OptionsLipsGenerator, self).__init__(**kwargs)
         self.tag = 'all_encoder_light_cat'
         self.data_dir = f'{constants.FaceForensicsRoot}processed_frames/'
-        self.batch_size = 24
+        self.batch_size = 32
         self.num_layers = 8
         self.num_heads = 8
         self.reg_lips = 10
@@ -142,7 +142,7 @@ class OptionsLipsGenerator(BaseOptions):
         self.z_token = False
         self.is_light = True
         self.draw_lips_lines = True
-        self.reg_lips_center = 10
+        self.reg_lips_center = 0
         self.concat_ref = True
         self.pretrained_tag = f''
         self.reverse_input = False
@@ -164,6 +164,7 @@ class OptionsLipsGeneratorSeq(OptionsLipsGenerator):
         self.is_light = False
         self.lr_decay_every = 1
         self.data_dir = f'{constants.FaceForensicsRoot}processed_frames_all/'
+        self.fill_args(kwargs)
 
 
 class OptionsVisemeUnet(BaseOptions):

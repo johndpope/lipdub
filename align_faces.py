@@ -260,8 +260,8 @@ if __name__ == '__main__':
     # aligner.crop_video(f"/mnt/r/projects/facesimile/shots/101/purpledino_genwoman/comp_wip/images/comp_main_publish_qt/101_purpledino_genwoman_comp_v017.mov",
     #                    f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v017", 100)
 
-    aligner.crop_video(f"{constants.DATA_ROOT}/raw_videos/obama_062814.mp4",
-        f"{constants.DATA_ROOT}/obama", 30)
+    aligner.crop_video(f"{constants.DATA_ROOT}/raw_videos/office_michael.mp4",
+        f"{constants.DATA_ROOT}/office_michael", 1000)
 
 
     # aligner.crop_video(f"{constants.DATA_ROOT}/raw_videos/obama_062814.mp4", f"{constants.DATA_ROOT}/obama", 30)

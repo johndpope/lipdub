@@ -169,11 +169,15 @@ class LipsGeneratorSeq(models_utils.Model):
         images = images.reshape(b, s * c, w, h)
         cond_lips = self.lips_encoder(lips)
         cond_visual = self.encode_images(ref)
-        out_a = self.generator_a(images, None, cond_lips).pred
-        out_b = self.generator_b(out_a, None, cond_visual).pred
+        out_a = self.generator_a(images, None, cond_visual).pred
+        out_b = self.generator_b(out_a, None, cond_lips).pred
         out_a = out_a.reshape(b, s, c, w, h)
         out_b = out_b.reshape(b, s, c, w, h)
         return {"cond_visual": cond_visual, "out_mid": out_a, "result": out_b}
+
+    @property
+    def generator_parameters(self):
+        return list(self.generator_a.parameters()) + list(self.generator_b.parameters())
 
     def __init__(self, opt: options.OptionsLipsGeneratorSeq):
         super(LipsGeneratorSeq, self).__init__()

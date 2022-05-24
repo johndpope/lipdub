@@ -4,12 +4,11 @@ import torchvision
 import options
 from custom_types import *
 import constants
-from utils import files_utils, train_utils, frontalize_landmarks
+from utils import files_utils, train_utils  #, frontalize_landmarks
 from align_faces import FaceAlign
 import imageio
 from torchvision.transforms import functional as tsf
 from PIL import Image
-import hashlib
 
 
 def get_frames_numbers(file, shuffle=True, get_single=False):
@@ -134,21 +133,22 @@ class ProcessFaceForensicsRoot:
                                                                           "landmarks_crops")]
         crop = files_utils.load_image(f"{self.out_root}{info['id']:07d}.png")
         return crop, lm_crop
-    cache = set()
 
-    def get_landmarks(self, image):
-        m = hashlib.md5()
-        m.update(image)
-        name = m.digest()
-        path = f"{constants.MNT_ROOT}/cache/{name}.npy"
-        assert name not in self.cache
-        if files_utils.is_file(path):
-            return files_utils.load_np(path)
+    def get_landmarks(self, path: List[str], image: Optional[ARRAY] = None) -> ARRAY:
+        name = path[0].split('/')[-2:] + [path[1]]
+        name = 'landmarks_'.join(name)
+        path_cache = f"{constants.MNT_ROOT}/cache/{name}.npy"
+        if files_utils.is_file(path_cache):
+            landmarks = files_utils.load_np(path_cache)
         else:
-            self.cache.add(name)
-            result = self.aligner.get_landmark(image)
-            files_utils.save_np(result, path)
-            return result
+            if image is None:
+                if path[-1] == '.npy':
+                    image = files_utils.load_np(''.join(path))
+                else:
+                    image = files_utils.load_image(''.join(path))
+            landmarks = self.aligner.get_landmark(image)
+            files_utils.save_np(landmarks, path_cache)
+        return landmarks
 
     @property
     def num_ids(self):
@@ -283,11 +283,11 @@ class LipsTransform:
 
 class LipsConditionedDS(Dataset, ProcessFaceForensicsRoot):
 
-    def prep_infer(self, path_base, path_driving):
-        crop_base = files_utils.load_np("".join(path_base))
-        lm_base = self.get_landmarks(crop_base)
-        driving_base = files_utils.load_np("".join(path_driving))
-        lm_driving = self.get_landmarks(driving_base)
+    def prep_infer(self, paths_base, paths_driving, item):
+        crop_base = files_utils.load_np("".join(paths_base[item]))
+        lm_base = self.get_landmarks(paths_base[item], crop_base)
+        driving_base = files_utils.load_np("".join(paths_driving[item]))
+        lm_driving = self.get_landmarks(paths_driving[item], driving_base)
         image_in, image_ref, _, image_full, mask, _, _ = self.get_item_(crop_base, lm_base, crop_base)
         _, _, lm_driving, driving_image, _, _, _ = self.get_item_(driving_base, lm_driving, driving_base)
         lm_driving = torch.from_numpy(lm_driving)
@@ -312,8 +312,8 @@ class LipsConditionedDS(Dataset, ProcessFaceForensicsRoot):
             mask_bg = draw_lips_lines(mask_bg, lm_base)
         # files_utils.imshow(crop_lines)
         (crop, mask_bg, mask), _ = self.transform([crop_base, mask_bg, mask], lm_base, train=self.is_train)
-        mask = mask.unsqueeze(0)
-        mask = (1 - nnf.max_pool2d(1 - mask, (13, 13), (1, 1), padding=6))[0]
+        # mask = mask.unsqueeze(0)
+        # mask = (1 - nnf.max_pool2d(1 - mask, (5, 5), (1, 1), padding=2))[0]
         reference_image, _ = self.transform(reference_image, train=self.is_train)
         lm_lips = self.transform.landmarks_only(lm_base, crop_base, self.is_train)[48:, :]
         lm_lips = self.transform.zero_center_landmarks(lm_lips)
@@ -348,12 +348,39 @@ class LipsConditionedDS(Dataset, ProcessFaceForensicsRoot):
 
 class LipsSeqDS(LipsConditionedDS):
 
+    @staticmethod
+    def explode_item_infer(item, history, max_len):
+        items_seq = [item - history // 2 + i for i in range(history)]
+        items_seq = [min(max(0, item), max_len - 1) for item in items_seq]
+        return items_seq
+
+    def prep_infer(self, paths_base, paths_driving, item):
+        items_seq = self.explode_item_infer(item, self.opt.image_seq, len(paths_base))
+        items_lips = self.explode_item_infer(item, self.opt.lips_seq, len(paths_driving))
+        crops_base = [files_utils.load_np("".join(paths_base[item])) for item in items_seq]
+        lms_base = [self.get_landmarks(paths_base[item], crops_base[i]) for i, item in enumerate(items_seq)]
+        driving_base = [files_utils.load_np("".join(paths_driving[item])) for item in items_lips]
+        lm_driving = [self.get_landmarks(paths_driving[item], driving_base[i]) for i, item in enumerate(items_lips)]
+        image_in, image_ref, _, image_full, mask, _, _ = self.get_item_(crops_base, lms_base, crops_base[self.opt.image_seq // 2])
+        lm_driving = self.transform_landmarks(lm_driving, driving_base[0])
+        driving_image, _ = self.transform(driving_base[self.opt.lips_seq // 2 ], None, train=False)
+        lm_driving = torch.from_numpy(lm_driving)
+        return image_in, image_ref, lm_driving, image_full, driving_image, mask
+
+    def transform_landmarks(self, landmarks, image):
+        lms_base = np.concatenate(landmarks, axis=0)
+        lm_lips = self.transform.landmarks_only(lms_base, image, self.is_train)
+        lm_lips = lm_lips.reshape((lm_lips.shape[0] // 68, 68, 2))[:, 48:, :]
+        lm_lips = self.transform.zero_center_landmarks(lm_lips)
+        return lm_lips.astype(np.float32)
+
     def get_item_(self, crops_base, lms_base, reference_image):
+        offset = (len(lms_base) - len(crops_base)) // 2
         mask = [get_mask(crop_base, lm_base) for crop_base, lm_base in zip(crops_base, lms_base)]
         mask_bgs = [np.ones_like(crops_base[0]) * 255 for _ in range(len(crops_base))]
-        lines = [self.extract_lines(crop_base, lm_base) for crop_base, lm_base in zip(crops_base, lms_base)]
+        lines = [self.extract_lines(crop_base, lm_base) for crop_base, lm_base in zip(crops_base, lms_base[offset:])]
         if self.opt.draw_lips_lines:
-            mask_bgs = [draw_lips_lines(mask_bg, lm_base) for mask_bg, lm_base in zip(mask_bgs, lms_base)]
+            mask_bgs = [draw_lips_lines(mask_bg, lm_base) for mask_bg, lm_base in zip(mask_bgs, lms_base[offset:])]
         # files_utils.imshow(crop_lines)
         all_transform = crops_base + mask_bgs + mask
         all_transform, _ = self.transform(all_transform, None, train=self.is_train)
@@ -361,12 +388,9 @@ class LipsSeqDS(LipsConditionedDS):
         mask = torch.stack(mask)
         crop = torch.stack(crop)
         mask_bg = torch.stack(mask_bg)
-        mask = 1 - nnf.max_pool2d(1 - mask, (13, 13), (1, 1), padding=6)
+        mask = 1 - nnf.max_pool2d(1 - mask, (5, 5), (1, 1), padding=2)
         reference_image, _ = self.transform(reference_image, train=self.is_train)
-        lms_base = np.concatenate(lms_base, axis=0)
-        lm_lips = self.transform.landmarks_only(lms_base, crops_base[0], self.is_train)
-        lm_lips = lm_lips.reshape((self.opt.lips_seq, 68, 2))[:, 48:, :]
-        lm_lips = self.transform.zero_center_landmarks(lm_lips)
+        lm_lips = self.transform_landmarks(lms_base, crops_base[0])
         masked = crop * (1 - mask) + mask * mask_bg
         lines = np.stack(lines, axis=0)
         masked = masked[:, :, 128:, 64: -64]
@@ -571,25 +595,26 @@ def vis_landmark_on_img(img, shape, line_width=2):
     draw_curve(list(range(42, 47)), loop=True, color=(71, 99, 255))
     draw_curve(list(range(48, 59)), loop=True, color=(238, 130, 238))  # mouth
     draw_curve(list(range(60, 67)), loop=True, color=(238, 130, 238))
-
     return img
 
 
 def get_mask(img, shape):
     points = shape[2:15]
-    # points[0] = ((shape[2] + shape[3]) / 2).astype(shape.dtype)
-    # points[-1] = ((shape[14] + shape[13]) / 2).astype(shape.dtype)
+    points[0] = ((shape[1] + shape[2]) / 2).astype(shape.dtype)
+    points[-1] = ((shape[15] + shape[14]) / 2).astype(shape.dtype)
     mask = np.zeros(img.shape[:2], dtype=np.uint8)
     cv2.fillPoly(mask, [points], 255)
+    nose_y = shape[33, 1]
+    mask[:nose_y] = 0
     return mask
 
 
 def infer():
-    dataset = LipsSeqDS(options.OptionsLipsGeneratorSeq())
+    dataset = LipsConditionedDS(options.OptionsLipsGenerator())
     dataset.is_train = False
-    for i in range(42745, len(dataset)):
-        x = dataset[42745]
-        # files_utils.imshow(x[1])
+    for i in range(5, len(dataset)):
+        x = dataset[40 * i]
+        files_utils.imshow(x[1])
         # files_utils.imshow(x[2])
         # im_lm = vis_landmark_on_img(255 * np.ones_like(image), lm)
         # mask = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -603,10 +628,11 @@ def infer():
 
 
 def main():
-    # video = "../assets/raw_videos/putin_a.mp4"
-    video = constants.FaceForensicsRoot + 'downloaded_videos'
-    ProcessFaceForensicsRoot(constants.FaceForensicsRoot + 'processed_frames_all/', -1).run_all()
+    video = "../assets/raw_videos/office_michael.mp4"
+    # video = constants.FaceForensicsRoot + 'downloaded_videos'
+    # ProcessFaceForensicsRoot(constants.FaceForensicsRoot + 'processed_frames_all/', -1).run_all()
+    ProcessFaceForensicsRoot(constants.MNT_ROOT + 'video_frames/office_jim/', -1).run(video, True)
 
 
 if __name__ == '__main__':
-    infer()
+    main()

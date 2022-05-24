@@ -70,12 +70,17 @@ class TrainLipsGenerator:
             out = map(lambda x: x.unsqueeze(0), out)
         return tuple(out)
 
-    def get_masked_loss(self, predict, gt, mask, mask_sum, invert_mask=False, key: Optional[str] = None):
+    def get_masked_loss(self, predict, gt, mask, mask_sum, invert_mask=False, key: Optional[str] = None,
+                        mse=True, lpips=True):
         if invert_mask:
             b, c, h, w = mask.shape
             mask_sum = h * w - mask_sum
             mask = 1 - mask
-        loss = nnf.mse_loss(predict, gt, reduction='none') + self.loss_fn_vgg(predict, gt)
+        loss = 0
+        if mse:
+            loss += nnf.mse_loss(predict, gt, reduction='none')
+        if lpips:
+            loss += self.loss_fn_vgg(predict, gt)
         loss = loss * mask
         loss = torch.einsum('bchw->b', loss) / (3 * mask_sum)
         loss = loss.mean()
@@ -134,7 +139,6 @@ class TrainLipsGenerator:
         im_clone = cv2.seamlessClone(im_src, im_dst, im_mask, center, cv2.NORMAL_CLONE)
 
         return im_clone
-
 
     def constructive_loss(self, group_a, group_b, temperature=.07, key: Optional[str] = None):
         fe = torch.cat((group_a, group_b))
@@ -309,10 +313,21 @@ class TrainLipsGenerator:
         files_utils.delete_single(f'{self.opt.cp_folder}/vid2vid/tmp.mp4')
         files_utils.delete_single(f'{self.opt.cp_folder}/vid2vid/tmp.wav')
 
-    def prep_process_infer(self, path_base, path_driving):
-        data = self.dataset.prep_infer(path_base, path_driving)
+    def prep_process_infer(self, path_base, path_driving, i):
+        data = self.dataset.prep_infer(path_base, path_driving, i)
         data = self.prepare_data(data, True)
         return data
+
+    def blend_infer(self, out_base, mask, image_full):
+        return out_base * mask + (1 - mask) * image_full, image_full
+
+    def get_driving_lips(self, landmarks):
+        driving_lips_image = np.ones((256, 256, 3), dtype=np.uint8) * 255
+        driven_landmarks = (landmarks[0].cpu().numpy() + 1) * 128
+        driving_lips = prcoess_face_forensics.draw_lips(driving_lips_image, driven_landmarks)
+        driving_lips = torch.from_numpy(driving_lips).to(self.device, dtype=torch.float32)
+        driving_lips = driving_lips.permute(2, 0, 1).unsqueeze(0) / 127.5 - 1
+        return driving_lips
 
     @models_utils.torch_no_grad
     def vid2vid(self, base_folder, driving_folder):
@@ -328,20 +343,12 @@ class TrainLipsGenerator:
         # self.load()
         vid_len = min(len(images_base), len(images_driving))
         self.logger.start(vid_len)
-        for path_base, path_driving in zip(images_base, images_driving):
-            image_in, image_ref, landmarks, image_full, driving_image, mask = self.prep_process_infer(path_base, path_driving)
+        for i in  range(vid_len):
+            image_in, image_ref, landmarks, image_full, driving_image, mask = self.prep_process_infer(images_base, images_driving, i)
             out_base = self.forward(image_in, landmarks, None, image_ref)
-            blend = self.blend(out_base[0], image_full[0], mask[0])
-            out_predict = out_base * mask + (1 - mask) * image_full
-            # out_predict = torch.from_numpy(blend).float().permute(2, 0, 1).unsqueeze(0).to(self.device)
-            # out_predict = out_predict / 122.5 - 1
-            # w = self.e4e.encode(out_image)
-            # out_image = self.stylegan(w)
-            driving_lips_image = np.ones((256, 256, 3), dtype=np.uint8) * 255
-            driven_landmarks = (landmarks[0].cpu().numpy() + 1) * 128
-            driving_lips = prcoess_face_forensics.draw_lips(driving_lips_image, driven_landmarks)
-            driving_lips = torch.from_numpy(driving_lips).to(self.device, dtype=torch.float32)
-            driving_lips = driving_lips.permute(2, 0, 1).unsqueeze(0) / 127.5 - 1
+            # blend = self.blend(out_base[0], image_full[0], mask[0])
+            out_predict, image_full = self.blend_infer(out_base, mask, image_full)
+            driving_lips = self.get_driving_lips(landmarks)
             image = [nnf.interpolate(image, (256, 256)) for image in (image_full, driving_image, driving_lips,
                                                                       out_predict)]
             image = torch.cat(image, dim=3)[0]
@@ -362,7 +369,8 @@ class TrainLipsGenerator:
     def train(self):
         self.loss_fn_vgg = lpips.LPIPS(net='vgg', spatial=True).to(self.device)
         if self.opt.reg_lips > 0:
-            self.lips_detection = train_utils.model_lc(options.OptionsLipsDetection(tag='vit').load())[0].eval()
+            self.lips_detection = train_utils.model_lc(options.OptionsLipsDetection(tag='vit',
+                                                                                    device=self.device).load())[0].eval()
             if self.data_parallel:
                 self.lips_detection = nn.DataParallel(self.lips_detection, device_ids=[i for i in range(torch.cuda.device_count())])
                 self.loss_fn_vgg = nn.DataParallel(self.loss_fn_vgg, device_ids=[i for i in range(torch.cuda.device_count())])
@@ -389,7 +397,7 @@ class TrainLipsGenerator:
         self.dataset, self.data_loader, self.val_loader = self.init_dataloader(opt)
         # opt.num_ids = 975
         self.model, opt = train_utils.model_lc(opt)
-        self.data_parallel = torch.cuda.device_count() > 1
+        self.data_parallel = torch.cuda.device_count() > 1 and opt.device != CPU
         if self.data_parallel:
             self.model = nn.DataParallel(self.model, device_ids=[i for i in range(torch.cuda.device_count())])
         self.opt: OptionsLipsGenerator = opt
@@ -469,13 +477,14 @@ class InferenceTrainingFull(TrainLipsGenerator):
 
 
 def main():
-    opt = OptionsLipsGenerator(tag='all_encoder_light_rev').load()
+    opt = OptionsLipsGenerator(tag='all').load()
     opt.device = CPU
     model = TrainLipsGenerator(opt)
     # model.train()
     # model.view()
     # model.view_grid(20, 12)
-    model.vid2vid(f'{constants.DATA_ROOT}/smith/', f'{constants.DATA_ROOT}obama/')
+    model.vid2vid(f'{constants.DATA_ROOT}/office_michael/', f'{constants.DATA_ROOT}office_jim/')
+    # model.vid2vid(f'{constants.DATA_ROOT}/obama/', f'{constants.DATA_ROOT}smith/')
 
 
 def main_inference():
