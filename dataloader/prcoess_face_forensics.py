@@ -1,14 +1,17 @@
 from __future__ import annotations
-import cv2
+from scipy.signal import savgol_filter
 import torchvision
+import align_faces
+from utils import image_utils
 import options
 from custom_types import *
 import constants
-from utils import files_utils, train_utils  #, frontalize_landmarks
+from utils import files_utils, train_utils, transformation_utils, landmarks_utils  #, frontalize_landmarks
 from align_faces import FaceAlign
 import imageio
 from torchvision.transforms import functional as tsf
 from PIL import Image
+from models.sync_net import process_audio
 
 
 def get_frames_numbers(file, shuffle=True, get_single=False):
@@ -23,6 +26,14 @@ def get_frames_numbers(file, shuffle=True, get_single=False):
     if shuffle:
         inds = inds[torch.rand(len(inds)).argsort()]
     return inds
+
+
+def filter_lips(lips):
+    lips = lips.reshape((-1, 204))
+    lips[:, :48 * 3] = savgol_filter(lips[:, :48 * 3], 15, 3, axis=0)
+    lips[:, 48 * 3:] = savgol_filter(lips[:, 48 * 3:], 5, 3, axis=0)
+    lips = lips.reshape((-1, 68, 3))
+    return lips
 
 
 class ProcessFaceForensicsRoot:
@@ -135,20 +146,7 @@ class ProcessFaceForensicsRoot:
         return crop, lm_crop
 
     def get_landmarks(self, path: List[str], image: Optional[ARRAY] = None) -> ARRAY:
-        name = path[0].split('/')[-2:] + [path[1]]
-        name = 'landmarks_'.join(name)
-        path_cache = f"{constants.MNT_ROOT}/cache/{name}.npy"
-        if files_utils.is_file(path_cache):
-            landmarks = files_utils.load_np(path_cache)
-        else:
-            if image is None:
-                if path[-1] == '.npy':
-                    image = files_utils.load_np(''.join(path))
-                else:
-                    image = files_utils.load_image(''.join(path))
-            landmarks = self.aligner.get_landmark(image)
-            files_utils.save_np(landmarks, path_cache)
-        return landmarks
+        return self.aligner.get_landmarks_cached(path, image)
 
     @property
     def num_ids(self):
@@ -173,7 +171,8 @@ class ProcessFaceForensicsRoot:
 
 class LipsTransform:
 
-    def zero_center_landmarks(self, landmarks: ARRAY):
+    @staticmethod
+    def zero_center_landmarks(landmarks: ARRAY):
         if landmarks.ndim == 2:
             max_val, min_val = landmarks.max(axis=0), landmarks.min(axis=0)
             center = (max_val + min_val) / 2
@@ -305,11 +304,11 @@ class LipsConditionedDS(Dataset, ProcessFaceForensicsRoot):
         return out
 
     def get_item_(self, crop_base, lm_base, reference_image):
-        mask = get_mask(crop_base, lm_base)
+        mask = landmarks_utils.get_mask(crop_base, lm_base)
         mask_bg = np.ones_like(crop_base) * 255
         lines = self.extract_lines(crop_base, lm_base)
         if self.opt.draw_lips_lines:
-            mask_bg = draw_lips_lines(mask_bg, lm_base)
+            mask_bg = landmarks_utils.draw_lips_lines(mask_bg, lm_base)
         # files_utils.imshow(crop_lines)
         (crop, mask_bg, mask), _ = self.transform([crop_base, mask_bg, mask], lm_base, train=self.is_train)
         # mask = mask.unsqueeze(0)
@@ -367,20 +366,20 @@ class LipsSeqDS(LipsConditionedDS):
         lm_driving = torch.from_numpy(lm_driving)
         return image_in, image_ref, lm_driving, image_full, driving_image, mask
 
-    def transform_landmarks(self, landmarks, image):
+    def transform_landmarks(self, landmarks, image, is_train: Optional[bool]= None):
         lms_base = np.concatenate(landmarks, axis=0)
-        lm_lips = self.transform.landmarks_only(lms_base, image, self.is_train)
+        lm_lips = self.transform.landmarks_only(lms_base, image, self.is_train if is_train is None else is_train)
         lm_lips = lm_lips.reshape((lm_lips.shape[0] // 68, 68, 2))[:, 48:, :]
         lm_lips = self.transform.zero_center_landmarks(lm_lips)
         return lm_lips.astype(np.float32)
 
     def get_item_(self, crops_base, lms_base, reference_image):
         offset = (len(lms_base) - len(crops_base)) // 2
-        mask = [get_mask(crop_base, lm_base) for crop_base, lm_base in zip(crops_base, lms_base)]
+        mask = [landmarks_utils.get_mask(crop_base, lm_base) for crop_base, lm_base in zip(crops_base, lms_base)]
         mask_bgs = [np.ones_like(crops_base[0]) * 255 for _ in range(len(crops_base))]
         lines = [self.extract_lines(crop_base, lm_base) for crop_base, lm_base in zip(crops_base, lms_base[offset:])]
         if self.opt.draw_lips_lines:
-            mask_bgs = [draw_lips_lines(mask_bg, lm_base) for mask_bg, lm_base in zip(mask_bgs, lms_base[offset:])]
+            mask_bgs = [landmarks_utils.draw_lips_lines(mask_bg, lm_base) for mask_bg, lm_base in zip(mask_bgs, lms_base[offset:])]
         # files_utils.imshow(crop_lines)
         all_transform = crops_base + mask_bgs + mask
         all_transform, _ = self.transform(all_transform, None, train=self.is_train)
@@ -431,9 +430,26 @@ class LipsSeqDS(LipsConditionedDS):
             raise ValueError
         return person_id, *data
 
+    def get_split_single(self, frac):
+        val_length = int(len(self) * frac)
+        select = np.random.choice(len(self), val_length, False).tolist()
+        val_inds = []
+        for item in select:
+            val_inds += list(range(item, min(len(self), item + 100)))
+            val_inds = list(set(val_inds))
+            if len(val_inds) >= val_length:
+                break
+        train_inds = torch.tensor([i for i in range(len(self)) if i not in val_inds], dtype=torch.int64)
+        val_inds = torch.tensor([i for i in val_inds if i < len(self)], dtype=torch.int64)
+        return train_inds, val_inds
 
     def get_split(self, frac):
         sequence_length = self.metadata['sequence_length']
+        if len(sequence_length) == 0:
+            return self.get_split_single(frac)
+        target_val_length =  int(len(self) * frac)
+        if target_val_length > 10000:
+            frac = 10000. / len(self)
         select = np.random.choice(len(sequence_length), int(len(sequence_length) * frac), False).tolist()
         split_train = []
         split_val = []
@@ -447,13 +463,139 @@ class LipsSeqDS(LipsConditionedDS):
             prev = sequence_length[i]
         return torch.cat(split_train), torch.cat(split_val)
 
-
     def __init__(self, opt: options.OptionsLipsGeneratorSeq):
         super(LipsSeqDS, self).__init__(opt)
         self.opt = opt
         # self.frontalize = frontalize_landmarks.FrontalizeLandmarks()
 
 
+class LipsSeqDSDual(LipsSeqDS):
+
+    def __getitem__(self, item):
+        person_id, masked, reference_image, _, crop, mask, mask_sum, lines = super(LipsSeqDSDual, self).__getitem__(item)
+        items_lips = self.explode_items(item, self.opt.lips_seq)
+        lms_base = [self.landmarks_sec[item_] for item_ in items_lips]
+        lm_lips = self.transform_landmarks(lms_base, self.crop_base, False)
+        return person_id, masked, reference_image, lm_lips, crop, mask, mask_sum, lines
+
+    def __len__(self):
+        return min(super(LipsSeqDSDual, self).__len__(), len(self.landmarks_sec))
+
+    def __init__(self, opt: options.OptionsLipsGeneratorSeq, landmarks_root: str):
+        super(LipsSeqDSDual, self).__init__(opt)
+        self.is_train = True
+        metadata = files_utils.load_pickle(f'{constants.MNT_ROOT}video_frames/{landmarks_root}/metadata')
+        self.landmarks_sec = metadata['landmarks_crops']
+        self.crop_base = files_utils.load_image(f"{constants.MNT_ROOT}video_frames/{landmarks_root}/{metadata['info'][0]['id']:07d}.png")
+
+
+
+class LipsSeqDSInfer(Dataset):
+
+    @staticmethod
+    def explode_item_infer(item, history, max_len):
+        items_seq = [item - history // 2 + i for i in range(history)]
+        items_seq = [min(max(0, item), max_len - 1) for item in items_seq]
+        return items_seq
+
+    def __getitem__(self, item):
+        items_seq = self.explode_item_infer(item, self.opt.image_seq, len(self.paths_base))
+        items_lips = self.explode_item_infer(item, self.opt.lips_seq, len(self.paths_driving))
+        crops_base = [files_utils.load_np("".join(self.paths_base[item])) for item in items_seq]
+        crops_base = [image_utils.resize(item, 256) for item in crops_base]
+        lms_base = [self.lm_base[item] for item in items_seq]
+        lm_driving = np.stack([self.lm_driving[item] for item in items_lips])
+        image_in, image_ref, _, image_full, mask, _, _ = self.train_ds.get_item_(crops_base, lms_base,
+                                                                        crops_base[self.opt.image_seq // 2])
+        lm_driving = torch.from_numpy(lm_driving).float()
+        return image_in, image_ref, lm_driving, image_full, mask, self.audio[item]
+
+    @property
+    def opt(self):
+        return self.train_ds.opt
+
+    def __len__(self):
+        return min(len(self.paths_base), len(self.paths_driving), len(self.audio))
+
+    @staticmethod
+    def get_frames(folder, starting_time, ending_time):
+        paths = files_utils.collect(folder, '.npy')
+        paths = [path for path in paths if 'image_' in path[1] or 'crop_' in path[1]]
+        metadata = files_utils.load_pickle(f"{folder}/metadata")
+        landmarks_2d = metadata['landmarks_2d']
+        depth = metadata['landmarks'][:, :, -1:]
+        landmarks = np.concatenate((landmarks_2d, depth), axis=2)
+        fps = metadata['fps']
+        if starting_time > 0:
+            paths = paths[int(fps * starting_time):]
+            landmarks = landmarks[int(fps * starting_time):]
+        else:
+            starting_time = 0
+        if ending_time > 0:
+            num_frames = int((ending_time - starting_time) * fps)
+            paths = paths[:num_frames]
+            landmarks = landmarks[:num_frames]
+        return paths, landmarks
+
+    def load_makeittalk_lm(self, path):
+        fl_driving = np.load(path).reshape((-1, 68, 3))
+        fl_driving = torch.from_numpy(fl_driving).reshape(1, -1, 68 * 3).permute(0, 2, 1)
+        fl_driving = nnf.interpolate(fl_driving, size=len(self.paths_driving), mode='linear')
+        fl_driving = fl_driving.permute(0, 2, 1).squeeze().reshape(-1, 68, 3).numpy()
+        fl_driving = fl_driving * 4
+        return fl_driving
+
+    @staticmethod
+    def get_normalized_lips(lm, ref_image):
+        lips = (lm[:, 48:] / ref_image.shape[0]) * 2 - 1
+        lips = LipsTransform.zero_center_landmarks(lips)
+        n, l, d = lips.shape
+        std = lips.reshape((n*l, d)).std(axis=0)
+        return lips, std
+
+    def align_lips(self, lm_driving, lm_base, align_driving):
+        if align_driving:
+            lm_driving = adjust_lm(lm_driving, lm_base[:len(lm_driving)])
+        ref_image = files_utils.load_np("".join(self.paths_base[0]))
+        lips_driving, std_driving = self.get_normalized_lips(lm_driving, ref_image)
+        return lips_driving[:, :, :2], lm_base[:, :, :2] / 4
+
+    # def align_lips(self, lm, lm_base):
+    #     aligned_lm = transformation_utils.align_landmarks(lm, lm_base[:len(self)])
+    #     # aligned_lm = aligned_lm.reshape((-1, 204))
+    #     # aligned_lm[:, :48 * 3] = savgol_filter(aligned_lm[:, :48 * 3], 15, 3, axis=0)
+    #     # aligned_lm[:, 48 * 3:] = savgol_filter(aligned_lm[:, 48 * 3:], 5, 3, axis=0)
+    #     # aligned_lm = aligned_lm.reshape((-1, 68, 3))
+    #     ref_image = files_utils.load_np("".join(self.paths_base[0]))
+    #     lips_driving, std_driving = self.get_normalized_lips(aligned_lm, ref_image)
+    #     _, std_base = self.get_normalized_lips(lm_base, ref_image)
+    #     scale = std_base / std_driving
+    #     lips_driving = lips_driving * scale[None, None, :]
+    #     return lips_driving[:, :, :2] , lm_base[:, :, :2] / 4
+
+    def get_mel_data(self, folder):
+        mel_data_path = f"{folder}/mel_data.npy"
+        if files_utils.is_file(mel_data_path):
+            mel_data = files_utils.load_np(mel_data_path)
+        else:
+            fps = files_utils.load_pickle(f"{folder}/metadata")["fps"]
+            mel_data = process_audio(f"{folder}/audio.wav", fps)
+            files_utils.save_np(mel_data, mel_data_path)
+        return mel_data
+
+    def __init__(self, train_ds: LipsSeqDS, base_folder: str, driving_folder: str, starting_time: int = -1,
+                 ending_time: int = -1, align_driving=True):
+        self.train_ds = train_ds
+        self.train_ds.is_train = False
+        self.paths_base, lm_base = self.get_frames(base_folder, starting_time, ending_time)
+        self.paths_driving, lm_driving = self.get_frames(driving_folder, -1, -1)
+        if len(self.paths_base) < len(self.paths_driving):
+            self.paths_driving, lm_driving = self.paths_driving[:len(self.paths_base)], lm_driving[:len(self.paths_base)]
+        # if makeittalk_lm_path is not None:
+        #     lm_driving = self.load_makeittalk_lm(makeittalk_lm_path)
+        self.lm_driving, self.lm_base = self.align_lips(lm_driving, lm_base, align_driving)
+        self.audio = self.get_mel_data(driving_folder)
+        # self.lm_base, self.lm_driving = pass
 
 
 class LipsLandmarksDS(Dataset, ProcessFaceForensicsRoot):
@@ -467,7 +609,7 @@ class LipsLandmarksDS(Dataset, ProcessFaceForensicsRoot):
 
         if DEBUG:
             crop = files_utils.image_to_display(crop)
-            image_ = draw_lips(crop.copy(), (lm_crop + 1) * self.transform.res / 2.)
+            image_ = landmarks_utils.draw_lips(crop.copy(), (lm_crop + 1) * self.transform.res / 2.)
             files_utils.imshow(image_)
         return crop, lm_lips
 
@@ -477,144 +619,22 @@ class LipsLandmarksDS(Dataset, ProcessFaceForensicsRoot):
         self.transform = LipsTransform(240)
 
 
-
-
-def get_drawer(img, shape, line_width):
-
-
-    def draw_curve_(idx_list, color=(0, 255, 0), loop=False):
-        for i in idx_list:
-            cv2.line(img, (shape[i, 0], shape[i, 1]), (shape[i + 1, 0], shape[i + 1, 1]), color, line_width)
-        if (loop):
-            cv2.line(img, (shape[idx_list[0], 0], shape[idx_list[0], 1]),
-                     (shape[idx_list[-1] + 1, 0], shape[idx_list[-1] + 1, 1]), color, line_width)
-
-    return draw_curve_
-
-
-def get_lips_landmarks(img, lips):
-    if type(lips) is T:
-        lips: T = lips.detach().cpu()
-        if lips.dim() > 2:
-            lips = lips.squeeze(0)
-        lips = (lips + 1) * (img.shape[0] / 2)
-    if lips.shape[0] > 30:
-        lips = lips[48:, :]
-    return lips
-
-
-
-class Line:
-
-    def intersect_bounds(self, target, dim: int, bounds: Optional[Tuple[float, float]]):
-        if self.direction[dim] == 0:
-            return None
-        t = (target - self.start[dim]) / self.direction[dim]
-        intersection = self.start + t * self.direction
-        if bounds[0] <= intersection[1 - dim] <= bounds[1]:
-            return intersection
-        else:
-            return None
-
-    def intersect_x(self, target_x, bounds_y):
-        return self.intersect_bounds(target_x, 0, bounds_y)
-
-    def intersect_y(self, target_y, bounds_x):
-        return self.intersect_bounds(target_y, 1, bounds_x)
-
-    def __init__(self, points):
-        self.start = points[0]
-        self.direction = points[1] - points[0]
-
-
-def get_intersections(pair, image) -> ARRAY:
-    line = Line(pair)
-    out = []
-    bound = (0, image.shape[0])
-    for target, dim in zip((0, 0, image.shape[0], image.shape[0]), (0, 1, 0, 1)):
-        intersection = line.intersect_bounds(target, dim, bound)
-        if intersection is not None:
-            out.append(intersection)
-        if len(out) == 2:
-            break
-    out = V(out)
-    return out
-
-
-def draw_lips_lines(image, landmarks, in_place=True):
-    lips = get_lips_landmarks(image, landmarks)
-    key_points = ([3, 9], [0, 6])  # height, width
-    if not in_place:
-        image = image.copy()
-    # lips = lips.astype(np.int32)
-    for i, pair in enumerate(key_points):
-        points = lips[pair]
-        line = get_intersections(points, image).astype(np.int32)
-        if len(line) == 0:
-            if i == 0:
-                line = [[points[0][0], 0], [points[0][0], 256]]
-            else:
-                line = [[0, points[0][1]], [256, points[0][1]]]
-        cv2.line(image, line[0], line[1], (0, 0, 0), 1)
-    return image
-
-
-def draw_lips(img, lips, scale=1):
-    if type(img) is int:
-        img = np.ones((img, img, 3), dtype=np.uint8) * 255
-    else:
-        img = img.copy()
-    lips = get_lips_landmarks(img, lips)
-    if scale != 1:
-        lips = scale * lips + .5 * img.shape[0] * (1 - scale)
-    lips = lips.astype(np.int32)
-    draw_curve = get_drawer(img, lips, 1)
-    draw_curve(list(range(0, 11)), loop=True, color=(238, 130, 238))  # mouth
-    draw_curve(list(range(12, 19)), loop=True, color=(238, 130, 238))
-    # for i in range(20):
-    #     print(i)
-    #     img_ = img.copy()
-    #     cv2.circle(img_, lips[i], 2, (255, 255, 255), thickness=-1)
-    #     files_utils.imshow(img_)
-    return img
-
-
-def vis_landmark_on_img(img, shape, line_width=2):
-    '''
-    Visualize landmark on images.
-    '''
-
-
-    shape = shape.astype(np.int32)
-    draw_curve = get_drawer(img, shape, line_width)
-    draw_curve(list(range(0, 16)), color=(255, 144, 25))  # jaw
-    draw_curve(list(range(17, 21)), color=(50, 205, 50))  # eye brow
-    draw_curve(list(range(22, 26)), color=(50, 205, 50))
-    draw_curve(list(range(27, 35)), color=(208, 224, 63))  # nose
-    draw_curve(list(range(36, 41)), loop=True, color=(71, 99, 255))  # eyes
-    draw_curve(list(range(42, 47)), loop=True, color=(71, 99, 255))
-    draw_curve(list(range(48, 59)), loop=True, color=(238, 130, 238))  # mouth
-    draw_curve(list(range(60, 67)), loop=True, color=(238, 130, 238))
-    return img
-
-
-def get_mask(img, shape):
-    points = shape[2:15]
-    points[0] = ((shape[1] + shape[2]) / 2).astype(shape.dtype)
-    points[-1] = ((shape[15] + shape[14]) / 2).astype(shape.dtype)
-    mask = np.zeros(img.shape[:2], dtype=np.uint8)
-    cv2.fillPoly(mask, [points], 255)
-    nose_y = shape[33, 1]
-    mask[:nose_y] = 0
-    return mask
-
-
 def infer():
     dataset = LipsConditionedDS(options.OptionsLipsGenerator())
     dataset.is_train = False
-    for i in range(5, len(dataset)):
-        x = dataset[40 * i]
-        files_utils.imshow(x[1])
+    align = align_faces.FaceAlign()
+    for i in range(5, len(dataset), 40):
+        info, lm_base = [dataset.metadata[name][55] for name in ("info", "landmarks_crops")]
+        crop_base = files_utils.load_image(f"{dataset.out_root}{info['id']:07d}.png")
+        lm_3d = align.predictor_3d.get_landmarks(crop_base)[0]
+
+        lm_3d[:, :2] = lm_base
+        files_utils.save_np(lm_3d, f"{constants.CACHE_ROOT}/template_landmarks")
+        return
+        image = landmarks_utils.vis_landmark_on_img(np.ones((512, 512, 3), dtype=np.uint8) * 255, lm_3d)
+        files_utils.imshow(image)
+        # x = dataset[40 * i]
+        # files_utils.imshow(x[1])
         # files_utils.imshow(x[2])
         # im_lm = vis_landmark_on_img(255 * np.ones_like(image), lm)
         # mask = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -628,11 +648,152 @@ def infer():
 
 
 def main():
-    video = "../assets/raw_videos/office_michael.mp4"
+    video = f"{constants.MNT_ROOT}/marz_dub/anthony_bourdain_english_faceformer.mp4"
     # video = constants.FaceForensicsRoot + 'downloaded_videos'
     # ProcessFaceForensicsRoot(constants.FaceForensicsRoot + 'processed_frames_all/', -1).run_all()
-    ProcessFaceForensicsRoot(constants.MNT_ROOT + 'video_frames/office_jim/', -1).run(video, True)
+    ProcessFaceForensicsRoot(constants.MNT_ROOT + 'video_frames/anthony_bourdain_english_faceformer/', -1).run(video, True)
+
+
+def finalize_video(sequence, driven_dir, name):
+    from moviepy import editor
+    metadata = files_utils.load_pickle(f"{driven_dir}/metadata")
+    sample_rate, audio = files_utils.load_wav(f"{driven_dir}/audio")
+    audio_out_len = float(audio.shape[0] * len(sequence)) / metadata['frames_count']
+    files_utils.save_wav(audio[:int(audio_out_len)], sample_rate, name + '.wav')
+    image_utils.gif_group(sequence, name + 'tmp', metadata['fps'])
+    video_clip = editor.VideoFileClip(name + 'tmp.mp4')
+    audio_clip = editor.AudioFileClip(name + '.wav')
+    audio_clip = editor.CompositeAudioClip([audio_clip])
+    video_clip.audio = audio_clip
+    video_clip.write_videofile(f'{name}.mp4')
+    video_clip.close()
+    files_utils.delete_single(name + 'tmp.mp4')
+    files_utils.delete_single(name + '.wav')
+
+
+def debug_landmarks(root, max_len=-1):
+    key = 'landmarks_2d'
+    name: str = root.split('/')[-2]
+    paths = files_utils.collect(root, '.npy')
+    paths = [path for path in paths if 'crop' in path[1]]
+    metadata = files_utils.load_pickle(f'{root}/metadata')
+    lms = metadata[key]
+    # lms = lms.reshape((-1, 204))
+    # lms[:, :48 * 3] = savgol_filter(lms[:, :48 * 3], 15, 3, axis=0)
+    # lms[:, 48 * 3:] = savgol_filter(lms[:, 48 * 3:], 5, 3, axis=0)
+    # lms = lms.reshape((-1, 68, 3))
+    out = []
+    if max_len > 0 and metadata['fps'] * max_len < len(paths):
+        lms = lms[:int(max_len * metadata['fps'])]
+        paths = paths[:int(max_len * metadata['fps'])]
+    for path, lm in zip(paths, lms):
+        crop = files_utils.load_np(''.join(path))
+        crop = landmarks_utils.vis_landmark_on_img(crop, lm)
+        out.append(crop)
+    finalize_video(out, root, f'{constants.DATA_ROOT}/debug/{name}_lm2d')
+    # image_utils.gif_group(out, f'{constants.DATA_ROOT}/debug/{name}_lm2d_tmp', 30)
+
+
+def get_center_std(lips):
+    center = (lips.max(axis=(0, 1)) + lips.min(axis=(0, 1))) / 2
+    lips = lips - center[None, None, :]
+    return lips, center, lips.std(axis=(0, 1))
+
+def lips_squares(lips_target, lips_source):
+    # mean_source, std_source = lips_source.mean(axis=(0, 1)), lips_source.std(axis=(0, 1))
+    # mean_target, std_target = lips_target.mean(axis=(0, 1)), lips_target.std(axis=(0, 1))
+    # lips_target = lips_target - mean_target[None, None, :]
+    # lips_source = lips_source - mean_source[None, None, :]
+    lips_out = lips_source[:, :12]
+    lips_in = lips_source[:, 12:]
+    # lips_out_target = lips_target[:, :12].reshape((lips_target.shape[0], 36))
+    lips_in_target = lips_target[:, 12:]
+    lips_in_target, center_target, std_target = get_center_std(lips_in_target)
+    lips_in, center, std = get_center_std(lips_in)
+    lips_in_target = lips_in_target * (std / std_target)[None, None, :]
+    lips_out = lips_out - center[None, None, :]
+    lips_in_target = lips_in_target.reshape((lips_in_target.shape[0], 24))
+    lips_out = lips_out.reshape((lips_source.shape[0], 36))
+    lips_in = lips_in.reshape((lips_source.shape[0], 24))
+    in2out, residual = np.linalg.lstsq(lips_in, lips_out, rcond=None)[:2]
+    out2in, residual = np.linalg.lstsq(lips_out, lips_in, rcond=None)[:2]
+    lips_out_predict = np.einsum('nm,mk->nk', lips_in_target, in2out)
+    lips_in_predict = lips_in_target
+    # lips_in_predict = np.einsum('nm,mk->nk', lips_out_predict, out2in)
+    lips_new = np.concatenate((lips_out_predict, lips_in_predict), axis=1)
+    lips_new = lips_new.reshape((lips_in_target.shape[0], 20, 3)) + center_target[None, None, :]
+    return lips_new
+
+
+def adjust_lm(fl_driving, fl_source):
+    template = files_utils.load_np(f"{constants.CACHE_ROOT}/template_landmarks") * 2
+    template = template.astype(fl_driving.dtype)
+    template = np.expand_dims(template, axis=0)
+    template = np.repeat(template, fl_driving.shape[0], axis=0)
+    aligned_all_fl_driving = transformation_utils.align_landmarks(fl_driving, template)
+    aligned_all_fl_source = transformation_utils.align_landmarks(fl_source, template)
+    lips_source = aligned_all_fl_source[:, 48:]
+    lips_target = aligned_all_fl_driving[:, 48:]
+    lips_target = lips_squares(lips_target, lips_source)
+    # lips_target = lips_target * std_source[None, :, :] / std_target[None, :, :]
+    aligned_all_fl_driving[:, 48:] = lips_target
+    aligned_all_fl_driving = transformation_utils.align_landmarks(aligned_all_fl_driving, fl_source)
+    return aligned_all_fl_driving
+
+
+def makeittalk(starttime=10):
+    name = "Eilish"
+    out_path = f"{constants.MNT_ROOT}/processed_infer/Eilish"
+    driving = f'{constants.MNT_ROOT}/processed_infer/Eilish_French052522'
+    key = 'landmarks_2d'
+    fl_source = files_utils.load_pickle(f'{out_path}/metadata')[key][starttime * 30:]
+    fl_driving = files_utils.load_pickle(f'{driving}/metadata')[key]
+    if key == 'landmarks':
+        fl_source = filter_lips(fl_source)
+        fl_driving = filter_lips(fl_driving)
+    else:
+        fl_source_depth = files_utils.load_pickle(f'{out_path}/metadata')['landmarks'][starttime * 30:, :, -1:]
+        fl_driving_depth = files_utils.load_pickle(f'{driving}/metadata')['landmarks'][:, :, -1:]
+        fl_source = np.concatenate((fl_source, fl_source_depth), axis=2)
+        fl_driving = np.concatenate((fl_driving, fl_driving_depth), axis=2)
+    # fl_source[:, :, 2] = fl_source[:, :, 2] - fl_source[:, :, 2].min()
+    # fl_source[:, :, 2] = fl_source[:, :, 2] / fl_source[:, :, 2].max()
+    paths = files_utils.collect(out_path, '.npy')
+    paths_base = [path for path in paths if 'crop' in path[1]][starttime * 30:]
+
+    paths_driving = files_utils.collect(driving, '.npy')
+    paths_driving = [path for path in paths_driving if 'crop' in path[1]]
+    fl_source = fl_source[:len(fl_driving)]
+    base = np.ones((1024, 1024, 3), dtype=np.uint8) * 255
+    aligned_all = adjust_lm(fl_driving, fl_source)
+    out = []
+    aligned_mid = transformation_utils.align_landmarks(fl_driving, fl_source)
+    for i in range(0, len(fl_driving)):
+        # crop = files_utils.load_np(''.join(paths[i]))
+        image_a = landmarks_utils.vis_landmark_on_img(base.copy(), fl_source[i])
+        image_b = landmarks_utils.vis_landmark_on_img(base.copy(), fl_driving[i])
+        image_c = landmarks_utils.vis_landmark_on_img(base.copy(), aligned_mid[i])
+        image_d = landmarks_utils.vis_landmark_on_img(base.copy(), aligned_all[i])
+
+        image_all = np.concatenate((image_a, image_b, image_c, image_d), axis=1)
+        image_all = Image.fromarray(image_all)
+        image_all = V(image_all.resize((256*3, 256), resample=Image.BICUBIC))
+        out.append(image_all)
+
+        # files_utils.imshow(image_all)
+        # files_utils.imshow(image_b)
+        # files_utils.imshow(image_c)
+    finalize_video(out, driving, f'{constants.DATA_ROOT}/debug/{name}_transfer_2d_scale')
+    # image = np.ones((256, 256, 3), dtype=np.uint8) * 255
+    # images = []
+    # for i in range(len(fl)):
+    #     img = vis_landmark_on_img(image.copy(), fl[i])
+    #     images.append(img)
+    #     # files_utils.imshow(img)
+    # image_utils.gif_group(images, '/home/ahertz/projects/MakeItTalk/examples/pred_fls_BillieEilish_French_lm', 30)
 
 
 if __name__ == '__main__':
-    main()
+    # infer()
+    makeittalk()
+    # main()

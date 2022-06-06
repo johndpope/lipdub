@@ -2,6 +2,7 @@ import os.path
 from utils import files_utils, train_utils, image_utils
 import dlib
 import tqdm
+import face_alignment
 from custom_types import *
 import imageio
 import PIL
@@ -10,6 +11,39 @@ import scipy
 from scipy.ndimage.filters import gaussian_filter1d
 import constants
 import ffmpeg
+import cv2
+
+
+def get_drawer(img, shape, line_width):
+
+
+    def draw_curve_(idx_list, color=(0, 255, 0), loop=False):
+        for i in idx_list:
+            cv2.line(img, (shape[i, 0], shape[i, 1]), (shape[i + 1, 0], shape[i + 1, 1]), color, line_width)
+        if (loop):
+            cv2.line(img, (shape[idx_list[0], 0], shape[idx_list[0], 1]),
+                     (shape[idx_list[-1] + 1, 0], shape[idx_list[-1] + 1, 1]), color, line_width)
+
+    return draw_curve_
+
+
+def vis_landmark_on_img(img, shape, line_width=2):
+    '''
+    Visualize landmark on images.
+    '''
+
+
+    shape = shape.astype(np.int32)
+    draw_curve = get_drawer(img, shape, line_width)
+    draw_curve(list(range(0, 16)), color=(255, 144, 25))  # jaw
+    draw_curve(list(range(17, 21)), color=(50, 205, 50))  # eye brow
+    draw_curve(list(range(22, 26)), color=(50, 205, 50))
+    draw_curve(list(range(27, 35)), color=(208, 224, 63))  # nose
+    draw_curve(list(range(36, 41)), loop=True, color=(71, 99, 255))  # eyes
+    draw_curve(list(range(42, 47)), loop=True, color=(71, 99, 255))
+    draw_curve(list(range(48, 59)), loop=True, color=(238, 130, 238))  # mouth
+    draw_curve(list(range(60, 67)), loop=True, color=(238, 130, 238))
+    return img
 
 
 def crop_image(filepath, quad, enable_padding=False, image_size=1024):
@@ -78,7 +112,24 @@ def calc_alignment_coefficients(pa, pb):
 
 class FaceAlign:
 
-    def get_landmark(self, image):
+    def get_landmarks_cached(self, path: List[str], image: Optional[ARRAY] = None) -> ARRAY:
+        name = path[0].split('/')[-2:] + [path[1]]
+        name = 'landmarks_'.join(name)
+        path_cache = f"{constants.MNT_ROOT}/cache/{name}.npy"
+        if files_utils.is_file(path_cache):
+            landmarks = files_utils.load_np(path_cache)
+        else:
+            if image is None:
+                if path[-1] == '.npy':
+                    image = files_utils.load_np(''.join(path))
+                else:
+                    image = files_utils.load_image(''.join(path))
+            landmarks = self.get_landmarks(image)
+            files_utils.save_np(landmarks, path_cache)
+        return landmarks
+
+
+    def get_landmarks(self, image):
         """get landmark with dlib
         :return: np.array shape=(68, 2)
         """
@@ -105,18 +156,13 @@ class FaceAlign:
         return lm
 
     def compute_transform(self, image, scale=1.0):
-        lm = self.get_landmark(image)
+        lm = self.get_landmarks(image)
         if lm is None:
-            raise Exception(f'Did not detect any faces in image')
-        lm_chin = lm[0: 17]  # left-right
-        lm_eyebrow_left = lm[17: 22]  # left-right
-        lm_eyebrow_right = lm[22: 27]  # left-right
-        lm_nose = lm[27: 31]  # top-down
-        lm_nostrils = lm[31: 36]  # top-down
+            raise ValueError(f'Did not detect any faces in image')
+
         lm_eye_left = lm[36: 42]  # left-clockwise
         lm_eye_right = lm[42: 48]  # left-clockwise
         lm_mouth_outer = lm[48: 60]  # left-clockwise
-        lm_mouth_inner = lm[60: 68]  # left-clockwise
         # Calculate auxiliary vectors.
         eye_left = np.mean(lm_eye_left, axis=0)
         eye_right = np.mean(lm_eye_right, axis=0)
@@ -160,7 +206,15 @@ class FaceAlign:
         self.logger.start(num_frames)
         for i in range(num_frames):
             frame = vid.get_data(i)
-            lm, c, x, y = self.compute_transform(frame, scale=scale)
+            try:
+                lm, c, x, y = self.compute_transform(frame, scale=scale)
+                self.errors = 0
+                self.cache = lm, c, x, y
+            except ValueError:
+                self.errors += 1
+                if self.errors > 3:
+                    raise ValueError
+                lm, c, x, y = self.cache
             cs.append(c)
             xs.append(x)
             ys.append(y)
@@ -200,9 +254,39 @@ class FaceAlign:
         crops, orig_images, quads = self.crop_faces(vid, num_frames)
         files_utils.save_np(quads, f'{out_path}/quads')
         image_utils.gif_group(crops, f'{out_path}/orig_align', fps)
+        # landmarks = np.zeros((len(crops), 68, 2))
         for i, crop in enumerate(crops):
+            # landmarks[i] = self.get_3d_landmakrs(crop)
             files_utils.save_np(crop, f'{out_path}/crop_{i:04d}')
+        metadata["video_path"] = video_path
         files_utils.save_pickle(metadata, f'{out_path}/metadata')
+
+    def landmarks_only(self, out_path, dim=3):
+        metadata = files_utils.load_pickle(f'{out_path}/metadata')
+        key = 'landmarks' if dim==3 else 'landmarks_2d'
+        if key in metadata:
+            return
+        paths = files_utils.collect(out_path, '.npy')
+        paths = [path for path in paths if 'crop' in path[1]]
+        landmarks = np.zeros((len(paths), 68, dim))
+        self.logger.start(len(paths))
+        for i, path in enumerate(paths):
+            crop = files_utils.load_np(''.join(path))
+            # landmark_2d = self.get_landmarks(crop)
+            if dim == 3:
+                landmarks[i] = self.predictor_3d.get_landmarks(crop)[0]
+            else:
+                landmarks[i] = self.get_landmarks(crop)
+            self.logger.reset_iter()
+            # image_a = vis_landmark_on_img(crop.copy(), landmark_2d)
+            # image_b = vis_landmark_on_img(crop.copy(), landmark_3d)
+            # files_utils.imshow(image_a)
+            # files_utils.imshow(image_b)
+        metadata[key] = landmarks
+        files_utils.save_pickle(metadata, f'{out_path}/metadata')
+        self.logger.stop()
+
+
 
     @staticmethod
     def paste_image(quad, image_new, image_orig):
@@ -216,7 +300,7 @@ class FaceAlign:
         image_orig = V(image_orig)[:, :, :3]
         return image_orig
 
-    def uncrop_video(self, video_path: str, crops_root, video_new: Union[str, ARRAYS]) -> ARRAYS:
+    def uncrop_video(self, crops_root, video_new: Union[str, ARRAYS], starting_time=-1) -> ARRAYS:
 
         class DummyVid:
 
@@ -228,8 +312,13 @@ class FaceAlign:
 
             def __init__(self, lst):
                 self.lst = lst
-
+        metadata = files_utils.load_pickle(f"{crops_root}/metadata")
+        video_path = metadata["video_path"]
         vid_orig = imageio.get_reader(f"{video_path}", 'ffmpeg')
+        if starting_time > 0:
+            prefix = int(metadata['fps'] * starting_time)
+        else:
+            prefix = 0
         if type(video_new) is str:
             vid_new = imageio.get_reader(f"{video_new}", 'ffmpeg')
         else:
@@ -239,17 +328,26 @@ class FaceAlign:
         num_frames = min(vid_orig.count_frames(), vid_new.count_frames())
         seq_paste = []
         for i in range(num_frames):
-            quad = quads[i]
-            frame_orig, frame_new = vid_orig.get_data(i), vid_new.get_data(i)
+            quad = quads[prefix + i]
+            frame_orig, frame_new = vid_orig.get_data(prefix + i), vid_new.get_data(i)
             pasted = self.paste_image(quad, frame_new, frame_orig)
             seq_paste.append(pasted)
         return seq_paste
 
+    @property
+    def predictor_3d(self) -> face_alignment.FaceAlignment:
+        if self.predictor_3d_ is None:
+            self.predictor_3d_ = face_alignment.FaceAlignment(face_alignment.LandmarksType._3D, device='cuda', flip_input=True)
+        return self.predictor_3d_
+
     def __init__(self):
         self.predictor = dlib.shape_predictor(f"{constants.PROJECT_ROOT}/weights/ffhq/shape_predictor_68_face_landmarks.dat")
         self.detector = dlib.get_frontal_face_detector()
+        self.predictor_3d_: Optional[face_alignment.FaceAlignment] = None
         self.fa = None
         self.logger = train_utils.Logger()
+        self.errors = 0
+        self.cache = None
         # self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType._2D, flip_input=True)
 
 
@@ -260,10 +358,10 @@ if __name__ == '__main__':
     # aligner.crop_video(f"/mnt/r/projects/facesimile/shots/101/purpledino_genwoman/comp_wip/images/comp_main_publish_qt/101_purpledino_genwoman_comp_v017.mov",
     #                    f"{constants.DATA_ROOT}/101_purpledino_genwoman_comp_v017", 100)
 
-    aligner.crop_video(f"{constants.DATA_ROOT}/raw_videos/office_michael.mp4",
-        f"{constants.DATA_ROOT}/office_michael", 1000)
-
-
+    aligner.crop_video(f"{constants.MNT_ROOT}/marz_dub/BillieFrench_FaceFormer.mp4",
+                       f"{constants.MNT_ROOT}/processed_infer/BillieFrench_FaceFormer", 10000)
+    aligner.landmarks_only(f"{constants.MNT_ROOT}/processed_infer/BillieFrench_FaceFormer", 2)
+    aligner.landmarks_only(f"{constants.MNT_ROOT}/processed_infer/BillieFrench_FaceFormer", 3)
     # aligner.crop_video(f"{constants.DATA_ROOT}/raw_videos/obama_062814.mp4", f"{constants.DATA_ROOT}/obama", 30)
     # viseme2vec(f"{constants.DATA_ROOT}/raw_videos/obama_062814",
     #             f"{constants.DATA_ROOT}/processed/viseme_obama_062814",
