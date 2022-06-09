@@ -1,6 +1,6 @@
 from torchvision.transforms import GaussianBlur
 import options
-from utils import train_utils, files_utils, image_utils
+from utils import train_utils, files_utils, image_utils, landmarks_utils
 from custom_types import *
 import constants
 from dataloader import prcoess_face_forensics
@@ -94,12 +94,28 @@ class TrainLipsGenerator:
         return landmarks
 
     def get_lips_detection_loss(self, predict_landmarks: T, landmarks: T, key: Optional[str] = None):
+        # max_val, min_val = predict_landmarks.max(dim=1)[0], predict_landmarks.min(dim=1)[0]
+        # center = (max_val + min_val) / 2
+        # predict_landmarks = landmarks - center[:, None, :]
+        select_a = torch.randint(20, size=(100,))
+        select_b = torch.randint(20, size=(100,))
+        dist_predict = (predict_landmarks[:, select_a] - predict_landmarks[:, select_b]).norm(2, dim=-1)
+        dist_gt = (landmarks[:, select_a] - landmarks[:, select_b]).norm(2, dim=-1)
+        loss = nnf.mse_loss(dist_predict, dist_gt)
+        if key is not None:
+            self.logger.stash_iter(key, loss)
+        return loss
+
+    def get_lips_detection_open_loss(self, predict_landmarks: T, landmarks: T, key: Optional[str] = None):
+        if self.opt.draw_jaw:
+            landmarks = landmarks[:, 17:]
         key_points = ((14, 18), (12, 16))  # height, width
         loss_all = []
         for pair in key_points:
             dist_predict = (predict_landmarks[:, pair[0]] - predict_landmarks[:, pair[1]]).norm(2, dim=1)
             dist_gt = (landmarks[:, pair[0]] - landmarks[:, pair[1]]).norm(2, dim=1)
-            loss_all.append(nnf.mse_loss(dist_predict, dist_gt))
+            loss = (dist_predict - dist_gt) ** 2 / (dist_gt + 1e-4)
+            loss_all.append(loss.mean())
         loss = sum(loss_all)
         if key is not None:
             self.logger.stash_iter(key, loss)
@@ -160,7 +176,7 @@ class TrainLipsGenerator:
         if self.opt.reg_lips > 0:
             out_predict = out * mask + (1 - mask) * gt_images
             predict_landmarks = self.get_landmarks(out_predict)
-            loss += self.opt.reg_lips * self.get_lips_detection_loss(predict_landmarks, landmarks, 'lips_open')
+            loss += self.opt.reg_lips * self.get_lips_detection_open_loss(predict_landmarks, landmarks, 'lips_open')
             if self.opt.reg_lips_center > 0:
                 loss += self.opt.reg_lips_center * self.get_lips_center_loss(predict_landmarks, lines, 'lips_center')
         if self.opt.reg_constructive > 0:
@@ -173,7 +189,7 @@ class TrainLipsGenerator:
             person_id_flip = person_id.__reversed__()
             out_flip = self.forward(images, landmarks_flip, person_id_flip, ref_images)
             out_predict_flip = out_flip * mask + (1 - mask) * gt_images
-            loss += self.opt.unpaired * self.get_lips_detection_loss(out_predict_flip, landmarks, 'unpaired_loss')
+            loss += self.opt.unpaired * self.get_lips_detection_open_loss(out_predict_flip, landmarks, 'unpaired_loss')
         if is_train:
             self.optimizer.zero_grad()
             loss.backward()
@@ -207,7 +223,7 @@ class TrainLipsGenerator:
             # all_images = torch.cat((gt_images, out_predict), dim=-1).cpu()
             for i in range(out_predict.shape[0]):
                 blended = self.blend(out[i], bg_in[i], mask_raw[i])
-                # predict_image = prcoess_face_forensics.draw_lips(out_predict[i], predict_landmarks[i])
+                # predict_image = landmarks_utils.draw_lips(out_predict[i], predict_landmarks[i])
                 files_utils.imshow(np.concatenate((gt_images[i], out_predict[i]), axis=1))
 
     @models_utils.torch_no_grad
@@ -323,27 +339,37 @@ class TrainLipsGenerator:
 
     def get_driving_lips(self, landmarks):
         driving_lips_image = np.ones((256, 256, 3), dtype=np.uint8) * 255
-        driven_landmarks = (landmarks[0].cpu().numpy() + 1) * 128
-        driving_lips = prcoess_face_forensics.draw_lips(driving_lips_image, driven_landmarks)
+        driven_landmarks = (landmarks.cpu().numpy() + 1) * 128
+        driving_lips = []
+        for i in range(driven_landmarks.shape[0]):
+            driving_lips.append(landmarks_utils.draw_lips(driving_lips_image.copy(), driven_landmarks[i]))
+        driving_lips = np.stack(driving_lips)
         driving_lips = torch.from_numpy(driving_lips).to(self.device, dtype=torch.float32)
-        driving_lips = driving_lips.permute(2, 0, 1).unsqueeze(0) / 127.5 - 1
+        driving_lips = driving_lips.permute(0, 3, 1, 2) / 127.5 - 1
         return driving_lips
 
+    @staticmethod
+    def get_frames(folder, starting_time):
+        paths = files_utils.collect(folder, '.npy')
+        paths = [path for path in paths if 'image_' in path[1] or 'crop_' in path[1]]
+        if starting_time > 0:
+            fps = files_utils.load_pickle(f"{folder}/metadata")['fps']
+            paths = paths[int(fps * starting_time):]
+        return paths
+
     @models_utils.torch_no_grad
-    def vid2vid(self, base_folder, driving_folder):
+    def vid2vid(self, base_folder, driving_folder, start_base=-1, start_driving=-1):
         self.model.eval()
         self.dataset.is_train = False
         name = f"{base_folder.split('/')[-2]}_{driving_folder.split('/')[-2]}"
-        images_base = files_utils.collect(base_folder, '.npy')
-        images_driving = files_utils.collect(driving_folder, '.npy')
-        images_driving = [path for path in images_driving if 'image_' in path[1] or 'crop_' in path[1]]
-        images_base = [path for path in images_base if 'image_' in path[1] or 'crop_' in path[1]]
+        images_base = self.get_frames(base_folder, start_base)
+        images_driving = self.get_frames(driving_folder, start_driving)
         out = []
         out_align = []
         # self.load()
         vid_len = min(len(images_base), len(images_driving))
         self.logger.start(vid_len)
-        for i in  range(vid_len):
+        for i in range(vid_len):
             image_in, image_ref, landmarks, image_full, driving_image, mask = self.prep_process_infer(images_base, images_driving, i)
             out_base = self.forward(image_in, landmarks, None, image_ref)
             # blend = self.blend(out_base[0], image_full[0], mask[0])
@@ -367,13 +393,6 @@ class TrainLipsGenerator:
         return self.logger.stop()
 
     def train(self):
-        self.loss_fn_vgg = lpips.LPIPS(net='vgg', spatial=True).to(self.device)
-        if self.opt.reg_lips > 0:
-            self.lips_detection = train_utils.model_lc(options.OptionsLipsDetection(tag='vit',
-                                                                                    device=self.device).load())[0].eval()
-            if self.data_parallel:
-                self.lips_detection = nn.DataParallel(self.lips_detection, device_ids=[i for i in range(torch.cuda.device_count())])
-                self.loss_fn_vgg = nn.DataParallel(self.loss_fn_vgg, device_ids=[i for i in range(torch.cuda.device_count())])
         for epoch in range(self.opt.epochs):
             self.train_epoch(epoch, self.data_loader, True)
             with torch.no_grad():
@@ -387,11 +406,30 @@ class TrainLipsGenerator:
     def set_train(self, is_train: bool):
         self.model.train(is_train)
 
-    def get_optimizer(self):
-        optimizer = Optimizer(self.model.parameters(), lr=1e-7)
+    def get_optimizer(self, model):
+        optimizer = Optimizer(model.parameters(), lr=1e-7)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, .9)
         warm_up_scheduler = train_utils.LinearWarmupScheduler(optimizer, 1e-4, self.opt.warm_up)
         return optimizer, scheduler, warm_up_scheduler
+
+    @property
+    def loss_fn_vgg(self):
+        if self.loss_fn_vgg_ is None:
+            self.loss_fn_vgg_ = lpips.LPIPS(net='vgg', spatial=True).to(self.device).eval()
+            if self.data_parallel:
+                self.loss_fn_vgg_ = nn.DataParallel(self.loss_fn_vgg_,
+                                                    device_ids=[i for i in range(torch.cuda.device_count())])
+        return self.loss_fn_vgg_
+
+    @property
+    def lips_detection(self):
+        if self.lips_detection_ is None:
+            self.lips_detection_ = train_utils.model_lc(options.OptionsLipsDetection(tag='vit', device=self.device).load())[0].eval()
+            if self.data_parallel:
+                self.lips_detection_ = nn.DataParallel(self.lips_detection_,
+                                                       device_ids=[i for i in range(torch.cuda.device_count())])
+
+        return self.lips_detection_
 
     def __init__(self, opt: OptionsLipsGenerator):
         self.dataset, self.data_loader, self.val_loader = self.init_dataloader(opt)
@@ -401,12 +439,12 @@ class TrainLipsGenerator:
         if self.data_parallel:
             self.model = nn.DataParallel(self.model, device_ids=[i for i in range(torch.cuda.device_count())])
         self.opt: OptionsLipsGenerator = opt
-        self.optimizer, self.scheduler, self.warm_up_scheduler = self.get_optimizer()
+        self.optimizer, self.scheduler, self.warm_up_scheduler = self.get_optimizer(self.model)
         self.offset = opt.warm_up // len(self.data_loader)
         self.logger = train_utils.Logger()
         self.best_score = 10000
-        self.loss_fn_vgg: Optional[lpips.LPIPS] = None
-        self.lips_detection: Optional[lips_detection_model.LipsDetectionModel] = None
+        self.loss_fn_vgg_: Optional[lpips.LPIPS] = None
+        self.lips_detection_: Optional[lips_detection_model.LipsDetectionModel] = None
         # self.model.vid2vid(f'{constants.DATA_ROOT}/putin_a/', f'{constants.DATA_ROOT}obama/', 'putin_obama')
 
 
@@ -427,7 +465,7 @@ class InferenceTraining(TrainLipsGenerator):
     def set_train(self, is_train):
         self.model.eval()
 
-    def get_optimizer(self):
+    def get_optimizer(self, _):
         return None, None, None
 
     def __init__(self, opt):
@@ -464,7 +502,7 @@ class InferenceTrainingFull(TrainLipsGenerator):
         files_utils.load_model(self.model, self.opt.pretrained_path, self.device, True)
         super(InferenceTrainingFull, self).train()
 
-    def get_optimizer(self):
+    def get_optimizer(self, _):
         return None, None, None
 
     def __init__(self, opt):
@@ -483,7 +521,7 @@ def main():
     # model.train()
     # model.view()
     # model.view_grid(20, 12)
-    model.vid2vid(f'{constants.DATA_ROOT}/office_michael/', f'{constants.DATA_ROOT}office_jim/')
+    # model.vid2vid(f'{constants.DATA_ROOT}/office_michael/', f'{constants.DATA_ROOT}office_jim/')
     # model.vid2vid(f'{constants.DATA_ROOT}/obama/', f'{constants.DATA_ROOT}smith/')
 
 
@@ -493,7 +531,7 @@ def main_inference():
                                pretrained_path=f'{constants.CHECKPOINTS_ROOT}conditional_lips_generator_all_id_token/model.pt',
                                epochs=20).load()
     model = InferenceTraining(opt)
-    # model.train()
+    model.train()
     # model.vid2vid(f'{constants.DATA_ROOT}/obama/', f'{constants.DATA_ROOT}101_purpledino_front_comp_v019/')
 
 

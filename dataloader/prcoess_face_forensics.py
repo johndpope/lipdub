@@ -6,7 +6,7 @@ from utils import image_utils
 import options
 from custom_types import *
 import constants
-from utils import files_utils, train_utils, transformation_utils, landmarks_utils  #, frontalize_landmarks
+from utils import files_utils, train_utils, transformation_utils, landmarks_utils,  frontalize_landmarks
 from align_faces import FaceAlign
 import imageio
 from torchvision.transforms import functional as tsf
@@ -367,15 +367,22 @@ class LipsSeqDS(LipsConditionedDS):
         return image_in, image_ref, lm_driving, image_full, driving_image, mask
 
     def transform_landmarks(self, landmarks, image, is_train: Optional[bool]= None):
+        if self.frontalize:
+            landmarks = [self.frontalize(lm) for lm in landmarks]
         lms_base = np.concatenate(landmarks, axis=0)
-        lm_lips = self.transform.landmarks_only(lms_base, image, self.is_train if is_train is None else is_train)
-        lm_lips = lm_lips.reshape((lm_lips.shape[0] // 68, 68, 2))[:, 48:, :]
+        lm_lips = self.transform.landmarks_only(lms_base, image, self.is_train and not self.opt.frontalize if is_train is None else is_train)
+        lm_lips = lm_lips.reshape((lm_lips.shape[0] // 68, 68, 2))
+        if self.opt.draw_lips_lines:
+            lm_lips = np.concatenate((lm_lips[:, :17, :], lm_lips[:, 48:, :]), axis=1)
+        else:
+            lm_lips = lm_lips[:, 48:, :]
         lm_lips = self.transform.zero_center_landmarks(lm_lips)
         return lm_lips.astype(np.float32)
 
+
     def get_item_(self, crops_base, lms_base, reference_image):
         offset = (len(lms_base) - len(crops_base)) // 2
-        mask = [landmarks_utils.get_mask(crop_base, lm_base) for crop_base, lm_base in zip(crops_base, lms_base)]
+        mask = [landmarks_utils.get_mask(crop_base, lm_base, self.opt) for crop_base, lm_base in zip(crops_base, lms_base)]
         mask_bgs = [np.ones_like(crops_base[0]) * 255 for _ in range(len(crops_base))]
         lines = [self.extract_lines(crop_base, lm_base) for crop_base, lm_base in zip(crops_base, lms_base[offset:])]
         if self.opt.draw_lips_lines:
@@ -387,7 +394,7 @@ class LipsSeqDS(LipsConditionedDS):
         mask = torch.stack(mask)
         crop = torch.stack(crop)
         mask_bg = torch.stack(mask_bg)
-        mask = 1 - nnf.max_pool2d(1 - mask, (5, 5), (1, 1), padding=2)
+        # mask = 1 - nnf.max_pool2d(1 - mask, (5, 5), (1, 1), padding=2)
         reference_image, _ = self.transform(reference_image, train=self.is_train)
         lm_lips = self.transform_landmarks(lms_base, crops_base[0])
         masked = crop * (1 - mask) + mask * mask_bg
@@ -466,7 +473,10 @@ class LipsSeqDS(LipsConditionedDS):
     def __init__(self, opt: options.OptionsLipsGeneratorSeq):
         super(LipsSeqDS, self).__init__(opt)
         self.opt = opt
-        # self.frontalize = frontalize_landmarks.FrontalizeLandmarks()
+        if opt.frontalize:
+            self.frontalize = frontalize_landmarks.FrontalizeLandmarks()
+        else:
+            self.frontalize = None
 
 
 class LipsSeqDSDual(LipsSeqDS):
@@ -620,20 +630,12 @@ class LipsLandmarksDS(Dataset, ProcessFaceForensicsRoot):
 
 
 def infer():
-    dataset = LipsConditionedDS(options.OptionsLipsGenerator())
+    dataset = LipsSeqDS(options.OptionsLipsGeneratorSeq())
     dataset.is_train = False
-    align = align_faces.FaceAlign()
+    # align = align_faces.FaceAlign()
     for i in range(5, len(dataset), 40):
-        info, lm_base = [dataset.metadata[name][55] for name in ("info", "landmarks_crops")]
-        crop_base = files_utils.load_image(f"{dataset.out_root}{info['id']:07d}.png")
-        lm_3d = align.predictor_3d.get_landmarks(crop_base)[0]
 
-        lm_3d[:, :2] = lm_base
-        files_utils.save_np(lm_3d, f"{constants.CACHE_ROOT}/template_landmarks")
-        return
-        image = landmarks_utils.vis_landmark_on_img(np.ones((512, 512, 3), dtype=np.uint8) * 255, lm_3d)
-        files_utils.imshow(image)
-        # x = dataset[40 * i]
+        x = dataset[40 * i]
         # files_utils.imshow(x[1])
         # files_utils.imshow(x[2])
         # im_lm = vis_landmark_on_img(255 * np.ones_like(image), lm)
@@ -794,6 +796,6 @@ def makeittalk(starttime=10):
 
 
 if __name__ == '__main__':
-    # infer()
-    makeittalk()
+    infer()
+    # makeittalk()
     # main()

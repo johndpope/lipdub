@@ -128,7 +128,7 @@ class OptionsLipsGenerator(BaseOptions):
 
     def __init__(self, **kwargs):
         super(OptionsLipsGenerator, self).__init__(**kwargs)
-        self.tag = 'all_encoder_light_cat'
+        self.tag = 'tmp'
         self.data_dir = f'{constants.FaceForensicsRoot}processed_frames/'
         self.batch_size = 32
         self.num_layers = 8
@@ -147,6 +147,9 @@ class OptionsLipsGenerator(BaseOptions):
         self.pretrained_tag = f''
         self.reverse_input = False
         self.res = 256
+        self.chin_mode = True
+        self.frontalize = True
+        self.draw_jaw = True
         self.fill_args(kwargs)
 
 
@@ -163,6 +166,10 @@ class OptionsLipsGeneratorSeq(OptionsLipsGenerator):
         self.res = 128
         self.is_light = False
         self.lr_decay_every = 1
+        self.discriminator = False
+        self.discriminator_iters = 2
+        self.discriminator_lambda = .01
+        self.penalty_lambda = .4
         self.data_dir = f'{constants.FaceForensicsRoot}processed_frames_all/'
         self.fill_args(kwargs)
 
@@ -172,7 +179,6 @@ class OptionsVisemeUnet(BaseOptions):
     @property
     def model_name(self) -> str:
         return 'unet'
-
 
     def __init__(self, **kwargs):
         super(OptionsVisemeUnet, self).__init__(**kwargs)
@@ -244,7 +250,8 @@ def backward_compatibility(opt: BaseOptions) -> BaseOptions:
                 'num_ids': -1, 'color_jitter': True,  'z_token': False,
                 'is_light': False, 'train_visual_encoder': False, 'draw_lips_lines': False,
                 'reg_lips_center': 0, 'reg_constructive': 0, 'reverse_input': False, 'concat_ref': False,
-                'res': 256
+                'res': 256, 'discriminator': False, 'chin_mode': False, 'frontalize': False,
+                'draw_jaw': False
                 }
     for key, item in defaults.items():
         if not hasattr(opt, key):

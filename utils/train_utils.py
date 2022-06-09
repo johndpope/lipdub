@@ -35,7 +35,9 @@ def model_factory(opt: options.BaseOptions, override_model: Optional[str], devic
         'conditional_lips_generator':
             {'module': 'models.lips_detection_model', 'class_name': 'ConditionalLipsGenerator'},
         'seq_lips_generator':
-            {'module': 'models.lips_detection_model', 'class_name': 'LipsGeneratorSeq'}
+            {'module': 'models.lips_detection_model', 'class_name': 'LipsGeneratorSeq'},
+        'seq_lips_discriminator':
+            {'module': 'models.lips_detection_model', 'class_name': 'LipsDiscriminatorSeq'}
     }
 
     model_name = opt.model_name if override_model is None else override_model
@@ -65,7 +67,8 @@ def save_model(model, path):
     return True
 
 
-def model_lc(opt: options.BaseOptions, override_model: Optional[str] = None) -> Tuple[models_utils.Model, options.BaseOptions]:
+def model_lc(opt: options.BaseOptions, suffix: str = '',
+             override_model: Optional[str] = None) -> Tuple[models_utils.Model, options.BaseOptions]:
 
     def save_model(model_: models_utils.Model, suffix: str = ''):
         nonlocal already_init
@@ -95,7 +98,7 @@ def model_lc(opt: options.BaseOptions, override_model: Optional[str] = None) -> 
         opt = opt_
         already_init = True
     opt = options.backward_compatibility(opt)
-    model = load_model(opt, opt.device, override_model=override_model)
+    model = load_model(opt, opt.device, suffix=suffix, override_model=override_model)
     model.save_model = save_model
     return model, opt
 

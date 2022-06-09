@@ -1,3 +1,5 @@
+import torch
+
 from custom_types import *
 from train import train_disentanglement
 from options import OptionsDisentanglementViseme
@@ -72,6 +74,8 @@ class PtiWithDisentanglement(train_disentanglement.TrainVisemeDisentanglement):
         self.stylegan.train(True)
         self.model.eval()
         self.optimizer = Optimizer(self.stylegan.parameters(),  betas=(.9, 0.999), lr=2e-5)
+
+
 
 
 def main():

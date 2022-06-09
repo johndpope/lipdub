@@ -61,11 +61,12 @@ class LipsEncoder(nn.Module):
         out = self.transformer(lips)
         return out[:, 0]
 
-    def __init__(self, opt):
+    def __init__(self, opt: options.OptionsLipsGenerator):
         super(LipsEncoder, self).__init__()
         scale = 512 ** -0.5
         self.project_viseme = nn.Linear(2, 512)
-        self.embedding = nn.Parameter((torch.randn(21 - int(opt.z_token), 512) * scale).unsqueeze(0))
+        num_lm = 37 if opt.draw_jaw else 20
+        self.embedding = nn.Parameter((torch.randn(num_lm + 1 - int(opt.z_token), 512) * scale).unsqueeze(0))
         self.transformer = transformers.Transformer(512, opt.num_heads, opt.num_layers)
 
 
@@ -179,6 +180,10 @@ class LipsGeneratorSeq(models_utils.Model):
     def generator_parameters(self):
         return list(self.generator_a.parameters()) + list(self.generator_b.parameters())
 
+    @property
+    def lips_encoder_parameters(self):
+        return list(self.lips_encoder.parameters())
+
     def __init__(self, opt: options.OptionsLipsGeneratorSeq):
         super(LipsGeneratorSeq, self).__init__()
         self.opt = opt
@@ -188,12 +193,28 @@ class LipsGeneratorSeq(models_utils.Model):
         self.generator_b = get_conditional_unet(opt)
 
 
+class LipsDiscriminatorSeq(models_utils.Model):
+
+    def forward(self, images):
+        b, s, c, h, w = images.shape
+        images = images.reshape(b, s * c, w, h)
+        out = self.encoder(images)
+        out = self.project(out)
+        return out
+
+    def __init__(self, opt: options.OptionsLipsGeneratorSeq):
+        super(LipsDiscriminatorSeq, self).__init__()
+        self.encoder = get_visual_encoder(opt, True)
+        self.project = nn.Linear(512, 1)
+
+
 if __name__ == '__main__':
-    model = LipsGeneratorSeq(options.OptionsLipsGeneratorSeq())
-    lips = torch.rand(5, 11, 20, 2)
+    model = LipsDiscriminatorSeq(options.OptionsLipsGeneratorSeq())
+    # lips = torch.rand(5, 11, 20, 2)
     images = torch.rand(5, 5, 3, 128, 128)
-    ref = torch.rand(5, 3, 128, 128)
-    out = model(images, lips, ref)
+    # ref = torch.rand(5, 3, 128, 128)
+    out = model(images)
+    print(out.shape)
     # model = ConditionalLipsGenerator(options.OptionsLipsGenerator())
     # x = torch.rand(5, 3, 256, 256)
     # y = torch.rand(5, 20, 2)

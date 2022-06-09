@@ -1,13 +1,16 @@
 from custom_types import *
 import cv2
+import options
 
 
-def get_mask(img, shape):
+def get_mask(img, shape, opt: options.OptionsLipsGenerator):
     points = shape[2:15]
     # points[0] = ((shape[1] + shape[2]) / 2).astype(shape.dtype)
     # points[-1] = ((shape[15] + shape[14]) / 2).astype(shape.dtype)
     mask = np.zeros(img.shape[:2], dtype=np.uint8)
     cv2.fillPoly(mask, [points.astype(np.int)], 255)
+    if opt.chin_mode:
+        cv2.ellipse(mask, shape[57], (55, 55), -20, 0, 220, 255, thickness=-1)
     nose_y = int(shape[33, 1])
     mask[:nose_y] = 0
     return mask

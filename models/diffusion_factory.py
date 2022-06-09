@@ -273,14 +273,19 @@ def get_conditional_unet(opt):
     return model
 
 
-def get_visual_encoder(opt):
+def get_visual_encoder(opt, is_seq: bool = False):
     if opt.res == 256:
         conf = ffhq256_autoenc(opt).model_conf
     else:
         conf = ffhq128_autoenc(opt).model_conf
+    if is_seq:
+        in_channels = 3 * opt.image_seq
+    else:
+        in_channels = 3
+
     return BeatGANsEncoderConfig(
         image_size=conf.image_size,
-        in_channels=3,
+        in_channels=in_channels,
         model_channels=conf.model_channels,
         out_hid_channels=conf.enc_out_channels,
         out_channels=conf.enc_out_channels,
